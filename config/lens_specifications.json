@@ -1,0 +1,29 @@
+{
+  "sensor": {
+    "width_mm": 12.5,
+    "height_mm": 10.0,
+    "width_px": 2750,
+    "height_px": 2200,
+    "pixel_size_um": 4.54
+  },
+  "lenses": {
+    "28mm": {
+      "model": "Schneider EMERALD 2.8/28 F-LD",
+      "focal_length_mm": 28,
+      "f_eff_mm": 28.65,
+      "f_number_range": "F/2.8 - F/22",
+      "ar_coating_nm": "400-1000",
+      "mount": "F-Mount",
+      "schneider_id": 1071606
+    },
+    "50mm": {
+      "model": "Schneider EMERALD 2.2/50 F",
+      "focal_length_mm": 50,
+      "f_eff_mm": 51.21,
+      "f_number_range": "F/2.2 - F/16",
+      "ar_coating_nm": "400-1000",
+      "mount": "F-Mount",
+      "schneider_id": 1062672
+    }
+  }
+}

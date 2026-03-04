@@ -1,0 +1,72 @@
+{
+  "celestial_tracking": {
+    "spice": {
+      "metakernel": "data/spice/terracam.tm",
+      "earth_fixed_frame": "ITRF93",
+      "inertial_frame": "J2000",
+      "aberration_correction": "LT+S"
+    },
+    "tracking_defaults": {
+      "settle_time_s": 3.0,
+      "default_interval_s": 60,
+      "min_interval_s": 10,
+      "max_interval_s": 600,
+      "min_elevation_deg": 5.0,
+      "apply_refraction": true
+    },
+    "target_presets": {
+      "MOON": {
+        "spice_name": "MOON",
+        "default_interval_s": 60,
+        "description": "Earth's Moon (~0.5 deg/hr apparent motion)"
+      },
+      "SUN": {
+        "spice_name": "SUN",
+        "default_interval_s": 120,
+        "description": "The Sun (~0.25 deg/hr apparent motion)"
+      },
+      "MERCURY": {
+        "spice_name": "MERCURY BARYCENTER",
+        "default_interval_s": 120,
+        "description": "Mercury"
+      },
+      "VENUS": {
+        "spice_name": "VENUS BARYCENTER",
+        "default_interval_s": 120,
+        "description": "Venus"
+      },
+      "MARS": {
+        "spice_name": "MARS BARYCENTER",
+        "default_interval_s": 300,
+        "description": "Mars"
+      },
+      "JUPITER": {
+        "spice_name": "JUPITER BARYCENTER",
+        "default_interval_s": 300,
+        "description": "Jupiter"
+      },
+      "SATURN": {
+        "spice_name": "SATURN BARYCENTER",
+        "default_interval_s": 300,
+        "description": "Saturn"
+      },
+      "URANUS": {
+        "spice_name": "URANUS BARYCENTER",
+        "default_interval_s": 300,
+        "description": "Uranus"
+      },
+      "NEPTUNE": {
+        "spice_name": "NEPTUNE BARYCENTER",
+        "default_interval_s": 300,
+        "description": "Neptune"
+      }
+    },
+    "atmospheric_refraction": {
+      "model": "bennett",
+      "bennett_a": 1.0,
+      "bennett_b": 0.0167,
+      "standard_pressure_mbar": 1013.25,
+      "standard_temperature_c": 10.0
+    }
+  }
+}

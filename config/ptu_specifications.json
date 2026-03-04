@@ -1,0 +1,57 @@
+{
+  "model": "FLIR PTU D100E",
+  "serial": {
+    "baudrate": 9600,
+    "bytesize": 8,
+    "parity": "none",
+    "stopbits": 1,
+    "timeout_s": 1.0
+  },
+  "defaults": {
+    "pan_speed": 1000,
+    "tilt_speed": 1000,
+    "pan_acceleration": 5000,
+    "tilt_acceleration": 5000,
+    "hold_power_mode": "REGULAR",
+    "move_power_mode": "HIGH"
+  },
+  "position_tolerance_steps": 5,
+  "settle_time_s": 2.0,
+  "await_timeout_s": 30.0,
+  "discovery": {
+    "probe_command": "VM",
+    "model_filter": "D100",
+    "serial_number_command": "VS",
+    "firmware_command": "V",
+    "probe_timeout_s": 1.0
+  },
+  "gpm": {
+    "detection_command": "GS",
+    "geo_point_settle_time_s": 3.0,
+    "commands": {
+      "gps_position": "GLLA",
+      "latitude": "GL",
+      "longitude": "GO",
+      "altitude": "GA",
+      "attitude": "GRPY",
+      "roll": "GR",
+      "pitch": "GP",
+      "yaw": "GY",
+      "geo_point": "GG",
+      "geo_distance": "GGD",
+      "landmark_add": "GMA",
+      "landmark_get": "GM",
+      "landmark_count": "GMN",
+      "landmark_delete": "GMD",
+      "landmark_clear": "GMC",
+      "calibrate": "GC",
+      "calibration_quality": "GCQ",
+      "camera_offset": "GCP",
+      "save_settings": "GDS",
+      "restore_settings": "GDR",
+      "factory_reset": "GDF",
+      "status": "GS",
+      "point_type": "GPT"
+    }
+  }
+}

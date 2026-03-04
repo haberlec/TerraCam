@@ -1,0 +1,99 @@
+{
+  "camera_specifications": {
+    "model": "MLx695",
+    "manufacturer": "Finger Lakes Instrumentation",
+    "status": "DISCONTINUED",
+    "sensor": {
+      "type": "Sony ICX695 Interline transfer CCD",
+      "active_pixels": {
+        "width": 2750,
+        "height": 2200,
+        "total": 6050000
+      },
+      "pixel_size": {
+        "width_um": 4.54,
+        "height_um": 4.54,
+        "area_um2": 20.6116
+      },
+      "imaging_area": {
+        "width_mm": 12.5,
+        "height_mm": 10.0,
+        "diagonal_mm": 16.0
+      },
+      "full_well_capacity_electrons": 17000,
+      "dynamic_range_db": 74.8,
+      "read_noise_electrons": {
+        "1.7_mhz": 3.0,
+        "10_mhz": 5.1
+      },
+      "dark_current": {
+        "value_eps": 0.0007,
+        "temperature_c": -30
+      },
+      "non_linearity_percent": 1.0,
+      "anti_blooming": "Yes (unspecified level)"
+    },
+    "quantum_efficiency": {
+      "description": "Absolute Quantum Efficiency digitized from MLx695 datasheet curve",
+      "wavelength_nm": [
+        400, 410, 420, 430, 440, 450, 460, 470, 480, 490,
+        500, 510, 520, 530, 540, 550, 560, 570, 580, 590,
+        600, 610, 620, 630, 640, 650, 660, 670, 680, 690,
+        700, 710, 720, 730, 740, 750, 760, 770, 780, 790,
+        800, 810, 820, 830, 840, 850, 860, 870, 880, 890,
+        900, 910, 920, 930, 940, 950, 960, 970, 980, 990,
+        1000, 1010, 1020, 1030, 1040, 1050, 1060, 1070, 1080, 1090, 1100
+      ],
+      "efficiency_percent": [
+        30, 35, 42, 48, 52, 55, 60, 65, 68, 70,
+        72, 73, 74, 75, 75, 75, 74, 73, 72, 71,
+        70, 68, 67, 66, 65, 64, 62, 60, 58, 56,
+        54, 52, 50, 47, 44, 41, 38, 35, 32, 29,
+        26, 24, 22, 20, 18, 16, 15, 14, 13, 12,
+        11, 10, 9, 8, 7, 6, 5.5, 5, 4.5, 4,
+        3.5, 3.2, 3, 2.8, 2.6, 2.4, 2.2, 2, 1.8, 1.6, 1.4
+      ]
+    },
+    "temperature_control": {
+      "cooling_method": "Air (Optional liquid)",
+      "max_cooling_below_ambient_c": 60,
+      "temperature_stability_c": 0.1,
+      "operating_range_c": {
+        "min": -30,
+        "max": 45
+      }
+    },
+    "interface": {
+      "type": "USB 2.0",
+      "digitization_clock_mhz": [1.7, 10.0],
+      "data_bit_depth": 16,
+      "channels": 1,
+      "external_trigger": true
+    },
+    "mechanical": {
+      "lens_mount": "C-mount",
+      "alternative_mounts": ["Nikon", "Canon"],
+      "weight_lbs": 2.8,
+      "weight_kg": 1.2
+    },
+    "power": {
+      "voltage_v": 12,
+      "current_tec_off_a": 1.0,
+      "current_tec_100_percent_a": 4.4,
+      "power_supply": "100-240V AC to 12V DC included"
+    },
+    "shutter": {
+      "type": "Electronic",
+      "optional_mechanical_mm": 25
+    },
+    "environment": {
+      "humidity_percent": "10% - 90% Relative",
+      "temperature_range_c": "-30°C to 45°C"
+    },
+    "software": {
+      "sdk": "USB2 / FLIGrab",
+      "subarray_readout": true,
+      "binning": true
+    }
+  }
+}

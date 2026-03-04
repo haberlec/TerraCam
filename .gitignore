@@ -1,0 +1,30 @@
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# FLI debug logs
+.FLIDebug.log
+
+# Output data
+out/
+focus_frames/
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/

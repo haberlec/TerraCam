@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fli"
+version = "1.0.0"
+description = "Python interface for FLI cameras and filter wheels"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "TerraCam Team"}
+]
+keywords = ["fli", "camera", "astronomy", "imaging", "filter wheel"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "pillow>=8.0.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+video = ["opencv-python>=4.5.0"]
+astro = ["spiceypy>=6.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+    "spiceypy>=6.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/TerraCam/FLI_SDK"
+Documentation = "https://github.com/TerraCam/FLI_SDK/docs"
+Repository = "https://github.com/TerraCam/FLI_SDK"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"fli.core" = ["*.so", "*.dylib"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
