@@ -5,7 +5,7 @@ FLI Camera Live Focus Script for M2 Mac
 This script provides a live video feed from the FLI camera for manual focus adjustment.
 Uses a two-stage approach:
 1. Auto-exposure using still frames (auto_expose.py) to find optimal exposure
-2. Video mode display (capture_video.py) with fixed exposure for focusing
+2. Rapid still-frame capture for focusing (synchronized, complete frames)
 
 Features:
 - Real-time image display using OpenCV
@@ -22,9 +22,9 @@ Controls:
 - '0'-'9': Move filter wheel to position (triggers recalibration)
 
 Usage:
-  python3 live_focus.py                    # Default (video mode, auto-exposure first)
+  python3 live_focus.py                    # Default (still mode, auto-exposure first)
   python3 live_focus.py --filter 2         # Start with filter wheel at position 2
-  python3 live_focus.py --no-video         # Use still image mode instead of video mode
+  python3 live_focus.py --video            # Use FLI video mode (experimental)
   python3 live_focus.py --no-auto          # Skip initial auto-exposure, use --exposure value
   python3 live_focus.py --exposure 500     # Start with 500ms exposure (or use as initial)
   python3 live_focus.py --help             # Show help
@@ -248,10 +248,10 @@ Controls (in the display window):
   '0' through '9' : Move filter wheel to position 0-9
 
 Examples:
-  python3 live_focus.py                    # Default (video mode, auto-exposure)
+  python3 live_focus.py                    # Default (still mode, auto-exposure)
   python3 live_focus.py --filter 2         # Start with filter at position 2
   python3 live_focus.py -f 5               # Start with filter at position 5
-  python3 live_focus.py --no-video         # Use still image mode
+  python3 live_focus.py --video            # Use FLI video mode (experimental)
   python3 live_focus.py --no-auto          # Skip initial auto-exposure
   python3 live_focus.py --exposure 500     # Start with 500ms exposure
   python3 live_focus.py --target 0.7       # Set auto-exposure target to 70%
@@ -266,9 +266,9 @@ Examples:
     )
 
     parser.add_argument(
-        '--no-video',
+        '--video',
         action='store_true',
-        help='Disable video mode and use still image capture (slower but more compatible)'
+        help='Use FLI video mode (experimental, may produce partial frames)'
     )
 
     parser.add_argument(
@@ -328,7 +328,7 @@ Examples:
     print("=" * 50)
 
     # Display configuration
-    mode_str = "Still Mode" if args.no_video else "Video Mode"
+    mode_str = "Video Mode" if args.video else "Still Mode"
     auto_str = "Disabled" if args.no_auto else f"Target P95 {args.target:.0%}"
     print(f"Mode: {mode_str}")
     print(f"Auto-Exposure: {auto_str}")
@@ -359,7 +359,7 @@ Examples:
         # Create and start video capture with the determined exposure
         with VideoCapture(
             exposure_ms=exposure_ms,
-            use_video_mode=not args.no_video,
+            use_video_mode=args.video,
             binning=(args.binning, args.binning),
             window_name="FLI Live Focus",
             recalibrate_callback=recalibrate_callback

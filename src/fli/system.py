@@ -56,6 +56,9 @@ class FLISystem:
         self.lib = FLILibrary.getDll()
         self.logger = logger or self._create_default_logger()
 
+        # Suppress verbose C library debug output (WARN + FAIL only)
+        self._set_fli_debug_level()
+
         # Device info cache
         self._camera_model: Optional[str] = None
         self._filter_wheel_model: Optional[str] = None
@@ -100,16 +103,20 @@ class FLISystem:
             console_handler.setFormatter(logging.Formatter('%(message)s'))
             self.logger.addHandler(console_handler)
 
-        # Also reduce FLI library verbosity
-        self._set_fli_debug_level()
-
         return self.logger
 
-    def _set_fli_debug_level(self):
-        """Set FLI library debug level to reduce verbose USB logging."""
+    def _set_fli_debug_level(self, level: Optional[int] = None):
+        """Set FLI library debug level to reduce verbose USB logging.
+
+        Parameters
+        ----------
+        level : int, optional
+            Bitmask of FLIDEBUG_* flags. Defaults to WARN | FAIL.
+        """
         try:
-            debug_level = FLIDEBUG_INFO | FLIDEBUG_WARN | FLIDEBUG_FAIL
-            self.lib.FLISetDebugLevel(None, debug_level)
+            if level is None:
+                level = FLIDEBUG_WARN | FLIDEBUG_FAIL
+            self.lib.FLISetDebugLevel(None, level)
         except Exception:
             pass  # Non-critical
 

@@ -88,9 +88,9 @@ class PTUController:
     Attributes
     ----------
     pan_resolution : float or None
-        Pan axis resolution in steps/degree (set during initialize()).
+        Pan axis resolution in arcsec/step (set during initialize()).
     tilt_resolution : float or None
-        Tilt axis resolution in steps/degree (set during initialize()).
+        Tilt axis resolution in arcsec/step (set during initialize()).
     """
 
     def __init__(self, config: PTUConfig):
@@ -159,13 +159,39 @@ class PTUController:
             self.serial_conn.close()
             self.logger.info("Disconnected from PTU")
 
-    def send_command(self, command: str) -> str:
+    def _flush_input(self):
+        """Drain any stale data from the serial input buffer."""
+        if self.serial_conn and self.serial_conn.is_open:
+            self.serial_conn.reset_input_buffer()
+
+    @staticmethod
+    def _parse_numeric_response(response: str) -> Optional[float]:
+        """Extract the first numeric value from a PTU response string.
+
+        Handles formats like ``"PR * 108.000000 seconds arc per position"``
+        or ``"PP * Current Pan position is 0"``.
+        """
+        for token in response.split():
+            try:
+                return float(token)
+            except ValueError:
+                continue
+        return None
+
+    def send_command(self, command: str, retries: int = 1) -> str:
         """Send command to PTU and return response.
+
+        Flushes stale serial input before sending, then reads lines until
+        the response echoes back the command prefix, ensuring correct
+        command/response alignment.
 
         Parameters
         ----------
         command : str
             PTU command string (delimiter added automatically if absent).
+        retries : int
+            Number of additional readline attempts to find the matching
+            response echo (default: 1).
 
         Returns
         -------
@@ -180,17 +206,34 @@ class PTUController:
         if not self.serial_conn or not self.serial_conn.is_open:
             raise RuntimeError("PTU not connected")
 
+        cmd_stripped = command.strip()
+
         # Add delimiter if not present
         if not command.endswith(' ') and not command.endswith('\n'):
             command += ' '
 
-        self.logger.debug(f"Sending command: {command.strip()}")
+        # Flush stale input before sending
+        self._flush_input()
+
+        self.logger.debug(f"Sending command: {cmd_stripped}")
         self.serial_conn.write(command.encode())
 
-        # Read response
-        response = self.serial_conn.readline().decode().strip()
-        self.logger.debug(f"Response: {response}")
+        # Read lines until we get one that starts with our command echo
+        max_reads = 2 + retries
+        for _ in range(max_reads):
+            raw = self.serial_conn.readline()
+            response = raw.decode('ascii', errors='replace').strip()
+            self.logger.debug(f"Response: {response}")
 
+            # PTU echoes the command at the start of the response line
+            if response.startswith(cmd_stripped):
+                # Strip the echoed command prefix
+                return response
+            # Accept bare success/error indicators if buffer was clean
+            if response.startswith('*') or response.startswith('!'):
+                return response
+
+        # Return whatever we last read if no match found
         return response
 
     def initialize(self) -> bool:
@@ -210,25 +253,24 @@ class PTUController:
             version_resp = self.send_command("V")
             self.logger.info(f"PTU Firmware: {version_resp}")
 
-            # Reset PTU to known state
-            self.send_command("R")
-            time.sleep(2)  # Wait for reset to complete
-
-            # Set feedback mode to verbose
+            # Set feedback mode to verbose (do this first to ensure
+            # all subsequent responses include descriptive text)
             self.send_command("FV")
+
+            # Halt any in-progress movement
+            self.send_command("H")
 
             # Get resolution values
             pan_res_resp = self.send_command("PR")
             tilt_res_resp = self.send_command("TR")
 
-            # Parse resolution (response format: "* <value>")
-            if pan_res_resp.startswith("*"):
-                self.pan_resolution = float(pan_res_resp.split()[1])
-            if tilt_res_resp.startswith("*"):
-                self.tilt_resolution = float(tilt_res_resp.split()[1])
+            # Parse resolution
+            # Response format: "PR * 108.000000 seconds arc per position"
+            self.pan_resolution = self._parse_numeric_response(pan_res_resp)
+            self.tilt_resolution = self._parse_numeric_response(tilt_res_resp)
 
-            self.logger.info(f"Pan resolution: {self.pan_resolution} steps/degree")
-            self.logger.info(f"Tilt resolution: {self.tilt_resolution} steps/degree")
+            self.logger.info(f"Pan resolution: {self.pan_resolution} arcsec/step")
+            self.logger.info(f"Tilt resolution: {self.tilt_resolution} arcsec/step")
 
             # Configure user-defined limits if specified
             if self.config.pan_min_user is not None:
@@ -379,8 +421,8 @@ class PTUController:
         try:
             current_pan, current_tilt = self.get_position()
 
-            pan_steps_delta = int(pan_degrees * self.pan_resolution)
-            tilt_steps_delta = int(tilt_degrees * self.tilt_resolution)
+            pan_steps_delta = int(pan_degrees * 3600.0 / self.pan_resolution)
+            tilt_steps_delta = int(tilt_degrees * 3600.0 / self.tilt_resolution)
 
             new_pan = current_pan + pan_steps_delta
             new_tilt = current_tilt + tilt_steps_delta
@@ -402,9 +444,18 @@ class PTUController:
         pan_resp = self.send_command("PP")
         tilt_resp = self.send_command("TP")
 
-        # Parse responses (format: "* Current Pan position is <value>")
-        pan_steps = int(pan_resp.split()[-1])
-        tilt_steps = int(tilt_resp.split()[-1])
+        # Parse responses (format: "PP * Current Pan position is <value>")
+        pan_val = self._parse_numeric_response(pan_resp)
+        tilt_val = self._parse_numeric_response(tilt_resp)
+
+        if pan_val is None or tilt_val is None:
+            self.logger.warning(
+                f"Failed to parse position: pan={pan_resp!r}, tilt={tilt_resp!r}"
+            )
+            raise ValueError("Could not parse position from PTU response")
+
+        pan_steps = int(pan_val)
+        tilt_steps = int(tilt_val)
 
         return pan_steps, tilt_steps
 
@@ -425,8 +476,8 @@ class PTUController:
             raise RuntimeError("Pan/tilt resolution not available")
 
         pan_steps, tilt_steps = self.get_position()
-        pan_degrees = pan_steps / self.pan_resolution
-        tilt_degrees = tilt_steps / self.tilt_resolution
+        pan_degrees = pan_steps * self.pan_resolution / 3600.0
+        tilt_degrees = tilt_steps * self.tilt_resolution / 3600.0
 
         return pan_degrees, tilt_degrees
 
@@ -447,7 +498,7 @@ class PTUController:
 
         while time.time() - start_time < timeout:
             response = self.send_command("A")
-            if response.strip() == "*":
+            if "*" in response:
                 return True
             time.sleep(0.1)
 

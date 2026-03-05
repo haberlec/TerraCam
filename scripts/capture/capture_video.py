@@ -78,7 +78,7 @@ class VideoCapture:
     def __init__(
         self,
         exposure_ms: int = 100,
-        use_video_mode: bool = True,
+        use_video_mode: bool = False,
         binning: Tuple[int, int] = (2, 2),
         window_name: str = "FLI Camera - Live View",
         recalibrate_callback: Optional[Callable[['VideoCapture'], int]] = None
@@ -88,7 +88,10 @@ class VideoCapture:
 
         Args:
             exposure_ms: Fixed exposure time in milliseconds
-            use_video_mode: If True, use FLI video mode (faster)
+            use_video_mode: If True, use FLI video mode. Default False because
+                FLI video mode grabs frames row-by-row without synchronization,
+                producing partial/corrupt frames on macOS. Still-frame mode
+                (repeated take_photo) is synchronized and reliable.
             binning: Pixel binning (hbin, vbin)
             window_name: OpenCV window title
             recalibrate_callback: Optional function called when 'a' is pressed.
@@ -282,14 +285,12 @@ class VideoCapture:
                     except queue.Empty:
                         pass
 
-                # Frame pacing
+                # Frame pacing — only needed in video mode where grabs
+                # are unsynchronized.  Still mode (take_photo) blocks until
+                # exposure + readout complete, so no extra delay is needed.
                 if self.video_mode_active:
-                    # Video mode - pace based on exposure
                     frame_time = (self.exposure_ms + 50) / 1000.0
                     time.sleep(max(0.01, frame_time))
-                else:
-                    # Still mode - slower
-                    time.sleep(0.5)
 
             except Exception as e:
                 consecutive_errors += 1
@@ -579,8 +580,8 @@ Controls:
         """
     )
 
-    parser.add_argument('--no-video', action='store_true',
-                        help='Use still capture mode')
+    parser.add_argument('--video', action='store_true',
+                        help='Use FLI video mode (experimental, may produce partial frames)')
     parser.add_argument('--exposure', type=int, default=100,
                         help='Exposure time in ms (default: 100)')
     parser.add_argument('--binning', type=int, default=2,
@@ -594,13 +595,13 @@ Controls:
     print("FLI Camera Video Capture")
     print("=" * 50)
     print(f"Exposure: {args.exposure}ms")
-    print(f"Mode: {'Still' if args.no_video else 'Video'}")
+    print(f"Mode: {'Video' if args.video else 'Still'}")
     print()
 
     try:
         with VideoCapture(
             exposure_ms=args.exposure,
-            use_video_mode=not args.no_video,
+            use_video_mode=args.video,
             binning=(args.binning, args.binning)
         ) as vc:
             vc.start_live_view()

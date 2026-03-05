@@ -270,11 +270,12 @@ class PayloadCoordinator:
                     raise RuntimeError(
                         "PTU resolution not available for degree conversion"
                     )
+                # Resolution is in arcsec/step; convert degrees to steps
                 position.pan_steps = int(
-                    position.pan_degrees * self.ptu.pan_resolution
+                    position.pan_degrees * 3600.0 / self.ptu.pan_resolution
                 )
                 position.tilt_steps = int(
-                    position.tilt_degrees * self.ptu.tilt_resolution
+                    position.tilt_degrees * 3600.0 / self.ptu.tilt_resolution
                 )
 
             # Notify position start callback
@@ -643,11 +644,12 @@ class PayloadCoordinator:
                 raise RuntimeError(
                     "PTU resolution not available for degree conversion"
                 )
+            # Resolution is in arcsec/step; convert degrees to steps
             center_pos.pan_steps = int(
-                center_pos.pan_degrees * self.ptu.pan_resolution
+                center_pos.pan_degrees * 3600.0 / self.ptu.pan_resolution
             )
             center_pos.tilt_steps = int(
-                center_pos.tilt_degrees * self.ptu.tilt_resolution
+                center_pos.tilt_degrees * 3600.0 / self.ptu.tilt_resolution
             )
 
         # Move to center

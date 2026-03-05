@@ -273,28 +273,38 @@ class USBCamera(USBDevice):
     def take_photo(self):
         """Expose the frame, wait for completion, and fetch the image data.
 
-        Uses manual shutter pre-open to bypass firmware shutter timing overhead.
-        The mechanical shutter has ~20-30ms transit time that the firmware adds
-        to every exposure. By pre-opening the shutter before starting exposure,
-        we get accurate exposure timing for all exposure durations.
+        Takes full manual control of the mechanical shutter to eliminate
+        firmware shutter timing overhead. The firmware's automatic shutter
+        control adds ~20-30ms of transit time to every exposure, which
+        causes partial occlusion — especially visible at short exposures
+        but present at all durations.
+
+        By using DARK frame type, the firmware leaves the shutter alone
+        and all shutter timing is controlled explicitly here.
 
         The sequence is:
         1. Open shutter manually
-        2. Wait 5ms for shutter to fully open
-        3. Start NORMAL exposure (firmware won't cycle an already-open shutter)
+        2. Wait 25ms for shutter to fully open
+        3. Start DARK exposure (firmware does not cycle shutter)
         4. Wait for exposure and readout
-        5. Close shutter manually
-        6. Fetch image data
+        5. Fetch image data
+        6. Close shutter manually
         """
-        SHUTTER_PREOPEN_DELAY_MS = 5  # Time for shutter to fully open
+        SHUTTER_PREOPEN_DELAY_MS = 25  # Time for shutter to fully open
 
         # Ensure camera is idle before starting exposure
         if not self.wait_for_idle(timeout_seconds=15):
             if DEBUG:
                 print(f"⚠️  Warning: Camera not idle when starting exposure, continuing anyway")
 
+        # Override frame type to DARK so firmware does not touch the shutter
+        result = self._libfli.FLISetFrameType(
+            self._dev, fliframe_t(FLI_FRAME_TYPE_DARK)
+        )
+        if result != 0:
+            raise FLIError(f"FLISetFrameType failed: {result}")
+
         # Manual shutter control for accurate exposure timing
-        # Open shutter before exposure starts
         self.control_shutter(open_shutter=True)
         time.sleep(SHUTTER_PREOPEN_DELAY_MS / 1000.0)
 

@@ -72,13 +72,21 @@ def find_filter_wheel():
     if not names_ptr or not names_ptr[0]:
         raise RuntimeError("No filter wheels found")
 
-    device_info = names_ptr[0].decode('utf-8')
-    device_id, model = device_info.split(';', 1)
-    print(f"Found filter wheel: {model}")
+    # Iterate to find an actual filter wheel (FLIList may return all FLI
+    # devices on macOS regardless of the requested domain).
+    i = 0
+    while names_ptr[i]:
+        device_info = names_ptr[i].decode('utf-8')
+        device_id, model = device_info.split(';', 1)
+        if 'Filter Wheel' in model or 'CenterLine' in model:
+            print(f"Found filter wheel: {model}")
+            fw = USBFilterWheel(device_id.encode(), model.encode())
+            dll.FLIFreeList(names_ptr)
+            return fw
+        i += 1
 
-    fw = USBFilterWheel(device_id.encode(), model.encode())
     dll.FLIFreeList(names_ptr)
-    return fw
+    raise RuntimeError("No filter wheels found (only non-filter-wheel devices in list)")
 
 
 def control_shutter(cam, open_shutter):
