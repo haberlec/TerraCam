@@ -12,10 +12,51 @@ import warnings
 import pytest
 from unittest.mock import Mock, patch
 
+from unittest import mock
+
 from fli.core.lib import FLIError, FLIWarning, chk_err
+from fli.core import lib as fli_lib
 from fli.core.camera import USBCamera
 from fli.core.lib import FLI_CAMERA_STATUS_IDLE, FLI_CAMERA_STATUS_EXPOSING
 from fli.system import FLISystem
+
+
+class TestLibraryLoader:
+    """Cross-platform DLL/.so name selection and clear load failures."""
+
+    def test_windows_64bit_prefers_libfli64(self):
+        with mock.patch.object(fli_lib.sys, "platform", "win32"), \
+                mock.patch("platform.architecture",
+                           return_value=("64bit", "")):
+            assert fli_lib._candidate_lib_names() == [
+                "libfli64.dll", "libfli.dll"
+            ]
+
+    def test_windows_32bit_prefers_libfli(self):
+        with mock.patch.object(fli_lib.sys, "platform", "win32"), \
+                mock.patch("platform.architecture",
+                           return_value=("32bit", "")):
+            assert fli_lib._candidate_lib_names() == [
+                "libfli.dll", "libfli64.dll"
+            ]
+
+    def test_unix_uses_so(self):
+        with mock.patch.object(fli_lib.sys, "platform", "darwin"):
+            assert fli_lib._candidate_lib_names() == [
+                "libfli.so", "libfli64.so"
+            ]
+
+    def test_load_failure_is_actionable(self):
+        """A missing library raises a RuntimeError naming tried paths."""
+        with mock.patch.object(fli_lib.sys, "platform", "linux"), \
+                mock.patch.object(
+                    fli_lib.cdll, "LoadLibrary",
+                    side_effect=OSError("cannot open shared object file")):
+            with pytest.raises(RuntimeError) as exc:
+                fli_lib._load_shared_library()
+        message = str(exc.value)
+        assert "Could not load" in message
+        assert "libfli.so" in message  # lists what it tried
 
 
 class TestChkErr:

@@ -360,6 +360,64 @@ def chk_err(err):
 LIBVERSIZ = 1024
 DEBUG_HOST_FILENAME = ".FLIDebug.log"
 
+def _candidate_lib_names():
+    """Return candidate shared-library filenames for the current platform.
+
+    Windows ships the FLI SDK DLL as ``libfli.dll`` for both bitnesses,
+    but historical builds and this project have also used ``libfli64.dll``
+    for 64-bit; try both so either naming works. On macOS/Linux the
+    modified libfli builds as ``libfli.so`` on both.
+    """
+    if sys.platform.startswith('win'):
+        import platform
+        is_64bit = platform.architecture()[0] == '64bit'
+        # Prefer the 64-bit-specific name first on 64-bit Python, then the
+        # plain name FLI actually distributes.
+        return (['libfli64.dll', 'libfli.dll'] if is_64bit
+                else ['libfli.dll', 'libfli64.dll'])
+    # macOS and Linux
+    return ['libfli.so', 'libfli64.so']
+
+
+def _load_shared_library():
+    """Locate and load the libfli shared library.
+
+    Searches the package directory first (where a bundled/installed DLL
+    or .so lives), then the system loader path. Raises a clear,
+    actionable error if nothing loads, since the most common cause on a
+    fresh install is a missing library file or an unavailable driver.
+    """
+    loader = windll if sys.platform.startswith('win') else cdll
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    names = _candidate_lib_names()
+
+    attempts = []
+    for name in names:
+        for path in (os.path.join(pkg_dir, name), name):
+            try:
+                return loader.LoadLibrary(path)
+            except OSError as err:
+                attempts.append(f"  {path}: {err}")
+
+    searched = "\n".join(attempts)
+    if sys.platform.startswith('win'):
+        hint = (
+            f"Place the 64-bit FLI SDK DLL at:\n"
+            f"  {os.path.join(pkg_dir, names[0])}\n"
+            f"and install the FLI USB driver (bundled with FLIGrab / the "
+            f"FLI Windows software). See docs/windows_install.md."
+        )
+    else:
+        hint = (
+            f"Build the C library (cd src/libfli && make) and ensure "
+            f"{names[0]} is on the loader path or in:\n  {pkg_dir}"
+        )
+    raise RuntimeError(
+        "Could not load the libfli shared library. Tried:\n"
+        f"{searched}\n\n{hint}"
+    )
+
+
 class FLILibrary:
     __dll = None
     @staticmethod
@@ -367,43 +425,7 @@ class FLILibrary:
                wrap_error_codes = True,
               ):
         if FLILibrary.__dll is None:
-            if sys.platform.startswith('linux'):
-                try: #first try to load library from package directory
-                    libpath = os.path.sep.join((os.path.dirname(__file__),"libfli.so"))
-                    FLILibrary.__dll = cdll.LoadLibrary(libpath)
-                except OSError:  #otherwise look in system locations
-                    FLILibrary.__dll = cdll.LoadLibrary("libfli.so")
-            elif sys.platform.startswith('darwin'):
-                try: #first try to load library from package directory
-                    libpath = os.path.sep.join((os.path.dirname(__file__),"libfli.so"))
-                    FLILibrary.__dll = cdll.LoadLibrary(libpath)
-                except OSError:  #otherwise look in system locations
-                    FLILibrary.__dll = cdll.LoadLibrary("libfli.so")
-            elif sys.platform.startswith('win'):
-                from ctypes import windll
-                import platform
-                bits, linkage = platform.architecture()
-                if bits == '32bit':
-                    libpath = os.path.sep.join((os.path.dirname(__file__),"libfli.dll"))
-                    FLILibrary.__dll = windll.LoadLibrary(libpath)
-                elif bits == '64bit':
-                    libpath = os.path.sep.join((os.path.dirname(__file__),"libfli64.dll"))
-                    FLILibrary.__dll = windll.LoadLibrary(libpath)
-            else:
-                msg = "platform '%s' not recognized" % (sys.platform,)
-                warnings.warn(Warning(msg))
-                #try loading the library anyway
-                libnames = ['libfli.dll','libfli64.dll','libfli.so','libfli64.so']
-                for libname in libnames:
-                    try:
-                        msg = "trying to load library at path '%s'" % (libname,)
-                        FLILibrary.__dll = cdll.LoadLibrary(libname)
-                        break #load successful, stop trying
-                    except OSError as err:
-                        msg = "failed to load library with error: %s" % (err,)
-                        warnings.warn(Warning(msg))
-                else:
-                    raise RuntimeError("'libfli' could not be loaded, check warnings")
+            FLILibrary.__dll = _load_shared_library()
             #wrap the api functions
             for api_func_name, argtypes in _API_FUNCTION_PROTOTYPES:
                 try:
