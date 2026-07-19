@@ -12,12 +12,25 @@
     "tilt_speed": 1000,
     "pan_acceleration": 5000,
     "tilt_acceleration": 5000,
-    "hold_power_mode": "REGULAR",
-    "move_power_mode": "HIGH"
+    "hold_power_mode": "LOW",
+    "move_power_mode": "LOW",
+    "sequential_axes": false
   },
   "position_tolerance_steps": 5,
   "settle_time_s": 2.0,
   "await_timeout_s": 30.0,
+  "command_timeout_s": 3.0,
+  "poll_interval_s": 0.2,
+  "mount_geometry": {
+    "description": "Camera entrance pupil offset from the pan/tilt axes intersection, in the tilt-stage frame (meters). The tilt axis passes near the lens nodal point (no tilt parallax); the pupil sits forward of the pan axis (pan parallax at finite range). Measure and update; angular offsets are calibratable from a mosaic model fit.",
+    "camera_offset_m": {
+      "forward": 0.0,
+      "along_tilt_axis": 0.0,
+      "up": 0.0
+    },
+    "boresight_pan_offset_deg": 0.0,
+    "boresight_tilt_offset_deg": 0.0
+  },
   "discovery": {
     "probe_command": "VM",
     "model_filter": "D100",

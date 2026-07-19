@@ -10,7 +10,7 @@
 __author__ = 'Craig Wm. Versek'
 __date__   = '2012-08-16'
 
-import sys, time
+import sys, time, logging
 
 import ctypes
 from ctypes import pointer, POINTER, byref, c_char, c_char_p, c_long, c_ubyte,\
@@ -19,8 +19,13 @@ from ctypes import pointer, POINTER, byref, c_char, c_char_p, c_long, c_ubyte,\
 from .lib import FLILibrary, FLIError, FLIWarning, flidomain_t, flidev_t,\
                 FLIDOMAIN_USB
 ###############################################################################
-DEBUG = True
+# DEBUG enables libfli C-level debug logging, which writes .FLIDebug.log
+# into the current working directory — keep off except when diagnosing
+# USB-level faults.
+DEBUG = False
 BUFFER_SIZE = 64
+
+logger = logging.getLogger(__name__)
 ###############################################################################
 class USBDevice(object):
     """ base class for all FLI USB devices"""
@@ -47,12 +52,19 @@ class USBDevice(object):
         self.close()
 
     def close(self):
-        """Safely close the device, preventing double-close"""
-        if not self._closed and hasattr(self, '_dev'):
+        """Safely close the device, preventing double-close.
+
+        Safe on partially-constructed instances (e.g. FLIOpen raised
+        before ``_closed`` was assigned): missing state means there is
+        nothing to close.
+        """
+        if not getattr(self, '_closed', True) and hasattr(self, '_dev'):
             try:
                 self._libfli.FLIClose(self._dev)
-            except:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                # Cleanup must not raise, but a failed close is worth
+                # knowing about (handle may be leaked / device wedged)
+                logger.warning(f"FLIClose failed for {self.model}: {e}")
             finally:
                 self._closed = True
         

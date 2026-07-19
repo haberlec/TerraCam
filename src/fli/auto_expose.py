@@ -20,7 +20,7 @@ For 16-bit CCD (65,535 max ADU):
 - Acceptable: P95 20,000-62,000 ADU, saturation < 1.0%
 
 Usage:
-    from scripts.capture.auto_expose import auto_expose, evaluate_exposure
+    from fli.auto_expose import auto_expose, evaluate_exposure
 
     # Evaluate any image
     metrics = evaluate_exposure(image)

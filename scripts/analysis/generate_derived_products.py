@@ -40,6 +40,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
 from typing import Optional, Tuple
@@ -49,16 +50,13 @@ from PIL import Image
 from scipy import ndimage
 from sklearn.decomposition import PCA
 
+from band_mapping import BandSet
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-FILTER_WAVELENGTHS_NM = [
-    450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 975, 1000, 1050, 1100
-]
-NUM_BANDS = len(FILTER_WAVELENGTHS_NM)
 
 DEFAULT_CROP = (325, 1899, 380, 2258)
 
@@ -73,9 +71,48 @@ DEFAULT_SHADOW_DILATION = 2
 # Helpers
 # ---------------------------------------------------------------------------
 
-def band_index(wavelength_nm: int) -> int:
-    """Return the index into the 15-band cube for a given wavelength."""
-    return FILTER_WAVELENGTHS_NM.index(wavelength_nm)
+def load_band_set(metadata_path: Path, n_bands: int) -> BandSet:
+    """Build a BandSet from the calibration metadata JSON.
+
+    Parameters
+    ----------
+    metadata_path : Path
+        Path to the ``*_metadata.json`` written by
+        calibrate_reflectance.py alongside the cube.
+    n_bands : int
+        Number of bands in the loaded cube, for consistency validation.
+
+    Returns
+    -------
+    BandSet
+        Wavelength-indexed band lookup for the cube.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the metadata file does not exist.
+    ValueError
+        If the metadata band count does not match the cube.
+    """
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"Calibration metadata not found: {metadata_path}. "
+            f"Band wavelengths are read from the metadata written by "
+            f"calibrate_reflectance.py; pass --metadata explicitly if it "
+            f"lives elsewhere."
+        )
+
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    wavelengths = metadata["wavelengths_nm"]
+    if len(wavelengths) != n_bands:
+        raise ValueError(
+            f"Metadata lists {len(wavelengths)} bands but cube has "
+            f"{n_bands}: {metadata_path} does not describe this cube"
+        )
+
+    return BandSet(wavelengths)
 
 
 def crop_and_rotate(
@@ -153,9 +190,9 @@ def segment_shadow(
     return mask
 
 
-def make_panel_mask(cube: np.ndarray) -> np.ndarray:
+def make_panel_mask(cube: np.ndarray, bands: BandSet) -> np.ndarray:
     """Panel mask from reflectance cube (R650 > 0.8)."""
-    return cube[:, :, band_index(650)] > 0.8
+    return cube[:, :, bands.index(650)] > 0.8
 
 
 def percentile_stretch(
@@ -234,7 +271,8 @@ def apply_colormap(
     data[shadow_mask] = 0
     data[panel_mask] = 0
     normed = percentile_stretch(data, exclude_mask, low_pct, high_pct)
-    cmap = cm.colormaps[cmap_name]
+    import matplotlib
+    cmap = matplotlib.colormaps[cmap_name]
     colored = (cmap(normed)[:, :, :3] * 255).astype(np.uint8)
     colored[shadow_mask] = 30
     colored[panel_mask] = 200
@@ -247,6 +285,7 @@ def apply_colormap(
 
 def generate_rgb_composite(
     cube: np.ndarray,
+    bands: BandSet,
     shadow_mask: np.ndarray,
     panel_mask: np.ndarray,
     output_dir: Path,
@@ -258,9 +297,9 @@ def generate_rgb_composite(
     650nm as the luminance source (typically sharpest due to chromatic
     aberration).
     """
-    red = cube[:, :, band_index(650)].copy()
-    grn = cube[:, :, band_index(550)].copy()
-    blu = cube[:, :, band_index(450)].copy()
+    red = cube[:, :, bands.index(650)].copy()
+    grn = cube[:, :, bands.index(550)].copy()
+    blu = cube[:, :, bands.index(450)].copy()
 
     for ch in [red, grn, blu]:
         panel_mean = ch[panel_mask].mean()
@@ -281,6 +320,7 @@ def generate_rgb_composite(
 
 def generate_false_color_composites(
     cube: np.ndarray,
+    bands: BandSet,
     panel_mask: np.ndarray,
     output_dir: Path,
 ) -> None:
@@ -292,17 +332,17 @@ def generate_false_color_composites(
     exclude = panel_mask
 
     nir_r_g = np.stack([
-        cube[:, :, band_index(850)],
-        cube[:, :, band_index(650)],
-        cube[:, :, band_index(550)],
+        cube[:, :, bands.index(850)],
+        cube[:, :, bands.index(650)],
+        cube[:, :, bands.index(550)],
     ], axis=2)
     save_jpg(percentile_stretch(nir_r_g, exclude, 2, 98),
              output_dir / "false_color_NIR_R_G.jpg")
 
     deep = np.stack([
-        cube[:, :, band_index(1100)],
-        cube[:, :, band_index(900)],
-        cube[:, :, band_index(750)],
+        cube[:, :, bands.index(1100)],
+        cube[:, :, bands.index(900)],
+        cube[:, :, bands.index(750)],
     ], axis=2)
     save_jpg(percentile_stretch(deep, exclude, 2, 98),
              output_dir / "false_color_deepNIR.jpg")
@@ -342,6 +382,7 @@ def generate_pca(
 
 def generate_band_ratios(
     cube: np.ndarray,
+    bands: BandSet,
     shadow_mask: np.ndarray,
     panel_mask: np.ndarray,
     output_dir: Path,
@@ -352,9 +393,9 @@ def generate_band_ratios(
     NDVI-like: (R850 - R650) / (R850 + R650) — vegetation / red-edge index.
     """
     exclude = shadow_mask | panel_mask
-    r650 = cube[:, :, band_index(650)]
-    r500 = cube[:, :, band_index(500)]
-    r850 = cube[:, :, band_index(850)]
+    r650 = cube[:, :, bands.index(650)]
+    r500 = cube[:, :, bands.index(500)]
+    r850 = cube[:, :, bands.index(850)]
 
     iron = np.where(r500 > 0.01, r650 / r500, 0.0)
     apply_colormap(iron, shadow_mask, panel_mask, exclude, "RdYlBu_r",
@@ -367,6 +408,7 @@ def generate_band_ratios(
 
 def generate_spectral_maps(
     cube: np.ndarray,
+    bands: BandSet,
     shadow_mask: np.ndarray,
     panel_mask: np.ndarray,
     output_dir: Path,
@@ -377,7 +419,7 @@ def generate_spectral_maps(
     650nm) scene pixels, approximating a spectrally neutral surface.
     """
     exclude = shadow_mask | panel_mask
-    r650 = cube[:, :, band_index(650)]
+    r650 = cube[:, :, bands.index(650)]
 
     neutral = ~shadow_mask & ~panel_mask & (r650 > 0.15) & (r650 < 0.30)
     if neutral.sum() < 100:
@@ -402,6 +444,7 @@ def generate_spectral_maps(
 
 def generate_hydration_maps(
     cube: np.ndarray,
+    bands: BandSet,
     shadow_mask: np.ndarray,
     panel_mask: np.ndarray,
     output_dir: Path,
@@ -431,11 +474,11 @@ def generate_hydration_maps(
 
     exclude = shadow_mask | panel_mask
 
-    R900 = cube[:, :, band_index(900)]
-    R950 = cube[:, :, band_index(950)]
-    R975 = cube[:, :, band_index(975)]
-    R1000 = cube[:, :, band_index(1000)]
-    R1050 = cube[:, :, band_index(1050)]
+    R900 = cube[:, :, bands.index(900)]
+    R950 = cube[:, :, bands.index(950)]
+    R975 = cube[:, :, bands.index(975)]
+    R1000 = cube[:, :, bands.index(1000)]
+    R1050 = cube[:, :, bands.index(1050)]
 
     # --- BD975: continuum 900-1050nm ---
     frac = (975.0 - 900.0) / (1050.0 - 900.0)
@@ -490,17 +533,80 @@ def generate_hydration_maps(
     save_jpg(colored, output_dir / "integrated_bd_975_1000.jpg")
 
 
+def generate_olivine_maps(
+    cube: np.ndarray,
+    bands: BandSet,
+    shadow_mask: np.ndarray,
+    panel_mask: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """Olivine (forsterite) band depth map targeting the Fe2+ 1-micron absorption.
+
+    Olivine produces a broad, asymmetric absorption centered near 1000nm
+    from three overlapping Fe2+ crystal field bands in M1 and M2 octahedral
+    sites (Sunshine & Pieters 1998). The reflectance peaks at 600-650nm,
+    then decreases into a trough at 1000-1050nm.
+
+    OBD1000 (Olivine Band Depth at 1000nm):
+      Zero-slope continuum anchored at R650 (the olivine reflectance peak).
+      TerraCam's 1100nm cutoff captures the absorption minimum but not
+      the true reflectance recovery, so a sloped continuum would
+      underestimate band depth. A flat continuum from the peak is the
+      physically appropriate choice for an incompletely resolved feature.
+
+      R_cont = R650
+      OBD = 1 - R1000 / R650
+
+    Reflectance-weighted by mean(R650, R850, R1000, R1100) to suppress
+    noisy detections in dark, low-SNR materials.
+    """
+    from matplotlib import cm
+
+    exclude = shadow_mask | panel_mask
+
+    R650 = cube[:, :, bands.index(650)]
+    R850 = cube[:, :, bands.index(850)]
+    R1000 = cube[:, :, bands.index(1000)]
+    R1100 = cube[:, :, bands.index(1100)]
+
+    # Zero-slope continuum from R650 (olivine reflectance peak)
+    obd = np.where(R650 > 0.01, 1.0 - R1000 / R650, 0.0)
+
+    # Require positive absorption only
+    obd = np.clip(obd, 0, None)
+
+    # Reflectance-weight to favor light-toned, high-SNR materials
+    R_mean = (R650 + R850 + R1000 + R1100) / 4.0
+    obd_weighted = obd * R_mean
+
+    valid = ~shadow_mask & (R650 > 0.01)
+    obd_weighted = np.where(valid, obd_weighted, 0.0)
+    obd_weighted[panel_mask] = 0
+
+    pos_scene = obd_weighted[(~exclude) & (obd_weighted > 0)]
+    vmax = np.percentile(pos_scene, 98) if len(pos_scene) > 100 else 1.0
+    obd_norm = np.clip(obd_weighted / vmax, 0, 1)
+    obd_norm[shadow_mask] = 0
+    obd_norm[panel_mask] = 0
+
+    colored = (cm.magma(obd_norm)[:, :, :3] * 255).astype(np.uint8)
+    colored[shadow_mask] = 30
+    colored[panel_mask] = 200
+    save_jpg(colored, output_dir / "olivine_bd_1000nm.jpg")
+
+
 def generate_roi_diagnostic(
     cube: np.ndarray,
+    bands: BandSet,
     shadow_mask: np.ndarray,
     panel_mask: np.ndarray,
     output_dir: Path,
 ) -> None:
     """Diagnostic overlay: panel in green, shadow in blue."""
     rgb = np.stack([
-        cube[:, :, band_index(650)],
-        cube[:, :, band_index(550)],
-        cube[:, :, band_index(450)],
+        cube[:, :, bands.index(650)],
+        cube[:, :, bands.index(550)],
+        cube[:, :, bands.index(450)],
     ], axis=2)
     rgb = np.clip(rgb * 3.0, 0, 1)
     rgb_8 = (rgb * 255).astype(np.uint8).copy()
@@ -530,12 +636,24 @@ def run_pipeline(args: argparse.Namespace) -> None:
     refl_cube = np.load(args.cube)
     logger.info("Full cube shape: %s", refl_cube.shape)
 
+    cube_path = Path(args.cube)
+    metadata_path = (
+        Path(args.metadata) if args.metadata
+        else cube_path.with_name(f"{cube_path.stem}_metadata.json")
+    )
+    bands = load_band_set(metadata_path, refl_cube.shape[2])
+    logger.info(
+        "Band wavelengths (nm): %s",
+        ", ".join("clear" if wl is None else f"{wl:.0f}"
+                  for wl in bands.wavelengths_nm),
+    )
+
     logger.info("Crop %s, rotate_180=%s", crop, rotate_180)
     cube = crop_and_rotate(refl_cube, crop, rotate_180)
     h, w, nb = cube.shape
     logger.info("Working cube: %d x %d x %d bands", h, w, nb)
 
-    panel_mask = make_panel_mask(cube)
+    panel_mask = make_panel_mask(cube, bands)
     shadow_mask = segment_shadow(
         cube,
         percentile=args.shadow_percentile,
@@ -546,25 +664,28 @@ def run_pipeline(args: argparse.Namespace) -> None:
     products_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Generating RGB composite")
-    generate_rgb_composite(cube, shadow_mask, panel_mask, products_dir)
+    generate_rgb_composite(cube, bands, shadow_mask, panel_mask, products_dir)
 
     logger.info("Generating false-color composites")
-    generate_false_color_composites(cube, panel_mask, products_dir)
+    generate_false_color_composites(cube, bands, panel_mask, products_dir)
 
     logger.info("Generating PCA composites")
     generate_pca(cube, shadow_mask, panel_mask, products_dir)
 
     logger.info("Generating band ratio indices")
-    generate_band_ratios(cube, shadow_mask, panel_mask, products_dir)
+    generate_band_ratios(cube, bands, shadow_mask, panel_mask, products_dir)
 
     logger.info("Generating spectral maps")
-    generate_spectral_maps(cube, shadow_mask, panel_mask, products_dir)
+    generate_spectral_maps(cube, bands, shadow_mask, panel_mask, products_dir)
 
     logger.info("Generating hydration / band-depth maps")
-    generate_hydration_maps(cube, shadow_mask, panel_mask, products_dir)
+    generate_hydration_maps(cube, bands, shadow_mask, panel_mask, products_dir)
+
+    logger.info("Generating olivine band-depth map")
+    generate_olivine_maps(cube, bands, shadow_mask, panel_mask, products_dir)
 
     logger.info("Generating ROI diagnostic")
-    generate_roi_diagnostic(cube, shadow_mask, panel_mask, products_dir)
+    generate_roi_diagnostic(cube, bands, shadow_mask, panel_mask, products_dir)
 
     logger.info("All products saved to %s", products_dir)
 
@@ -584,6 +705,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cube", type=str, required=True,
         help="Path to reflectance cube (.npy), output of calibrate_reflectance.py.",
+    )
+    parser.add_argument(
+        "--metadata", type=str, default=None,
+        help="Path to the calibration metadata JSON with per-band "
+             "wavelengths (default: <cube>_metadata.json next to the cube).",
     )
     parser.add_argument(
         "--output-dir", type=str, default="./out/derived",
@@ -611,7 +737,7 @@ def parse_args() -> argparse.Namespace:
     mask.add_argument(
         "--shadow-min-bands", type=int,
         default=DEFAULT_SHADOW_MIN_BANDS,
-        help=f"Minimum bands below threshold (default: {DEFAULT_SHADOW_MIN_BANDS}/{NUM_BANDS}).",
+        help=f"Minimum bands below threshold (default: {DEFAULT_SHADOW_MIN_BANDS}).",
     )
 
     return parser.parse_args()

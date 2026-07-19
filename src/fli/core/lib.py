@@ -333,12 +333,12 @@ _API_FUNCTION_PROTOTYPES = [
 # Error Handling
 ###############################################################################
 class FLIError(Exception):
-    def __init__(self, message, errors):
+    def __init__(self, message, errors=None):
         super().__init__(message)
         self.errors = errors
 
 class FLIWarning(Warning):
-    def __init__(self, message, warning):
+    def __init__(self, message, warning=None):
         super().__init__(message)
         self.errors = warning
 
@@ -348,8 +348,10 @@ def chk_err(err):
         msg = os.strerror(abs(err)) #err is always negative
         raise FLIError(msg, err)
     if err > 0:
-        msg = os.strerror(err)      #FIXME, what if err is positive?
-        raise FLIWarning(msg)
+        # The FLI API documents 0 = success, negative = error; treat an
+        # unexpected positive return as a warning, not a failure.
+        msg = os.strerror(err)
+        warnings.warn(FLIWarning(msg, err))
     return err
 
 ###############################################################################

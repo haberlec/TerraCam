@@ -12,9 +12,15 @@ For each band:
   3. reflectance = panel_reflectance * (DN_per_ms - shadow_mean) /
                                        (panel_mean - shadow_mean)
 
+Band wavelengths are resolved from the filter positions recorded in the
+capture metadata via config/filter_specifications.json (position 0 = clear,
+positions 1-16 = bandpass filters, 400-1100nm ascending). The clear
+position is excluded from calibration.
+
 Outputs:
-  - reflectance_cube.npy — float32, shape (rows, cols, 15)
-  - reflectance_cube_metadata.json — per-band calibration provenance
+  - reflectance_cube.npy — float32, shape (rows, cols, n_bands)
+  - reflectance_cube_metadata.json — per-band calibration provenance,
+    including the wavelength of every band along the cube axis
   - reflectance_bands/ — individual bands as uint16 TIFF (scaled x10000)
 
 Usage:
@@ -33,11 +39,13 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 from scipy import ndimage
+
+from band_mapping import load_filter_wavelengths, nearest_band_index
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +53,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Filter positions 1-15 map to these center wavelengths (nm).
-# Position 0 is clear/open (no bandpass) and is excluded.
-FILTER_WAVELENGTHS_NM = [
-    450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 975, 1000, 1050, 1100
-]
-NUM_BANDS = len(FILTER_WAVELENGTHS_NM)
-
 # Reflectance TIFF scaling factor (remote sensing convention)
 REFLECTANCE_SCALE_FACTOR = 10000
 
 # Panel segmentation defaults
-DEFAULT_PANEL_BAND = 2       # 550nm — good SNR, avoids chromatic issues
+DEFAULT_PANEL_WAVELENGTH_NM = 550  # good SNR, avoids chromatic issues
 DEFAULT_PANEL_PERCENTILE = 95
 DEFAULT_PANEL_EROSION = 20   # pixels to erode inward from panel edges
 
@@ -72,20 +73,35 @@ DEFAULT_SHADOW_DILATION = 2
 # Raw image loading
 # ---------------------------------------------------------------------------
 
-def load_raw_images(input_dir: Path) -> Tuple[np.ndarray, List[dict]]:
-    """Load raw TIFF images and metadata for filter positions 1-15.
+def load_raw_images(
+    input_dir: Path,
+    filter_wavelengths: Dict[int, Optional[float]],
+) -> Tuple[np.ndarray, List[dict]]:
+    """Load raw TIFF images and metadata for the bandpass filter positions.
+
+    Bands are ordered by filter position (ascending wavelength). The clear
+    position 0 is skipped; unknown filter positions are an error.
 
     Parameters
     ----------
     input_dir : Path
         Directory containing raw capture files (TIFF + JSON metadata).
+    filter_wavelengths : dict
+        Filter position to center wavelength mapping from
+        ``load_filter_wavelengths()``.
 
     Returns
     -------
     cube : np.ndarray
-        Raw DN image stack, shape (rows, cols, 15), float64.
+        Raw DN image stack, shape (rows, cols, n_bands), float64.
     band_metadata : list of dict
         Per-band metadata including exposure_ms, filter_position, wavelength.
+
+    Raises
+    ------
+    ValueError
+        If a capture references a filter position absent from the config,
+        or if two captures claim the same filter position.
     """
     tiff_files = sorted(input_dir.glob("*.tiff")) + sorted(input_dir.glob("*.tif"))
     if not tiff_files:
@@ -106,16 +122,33 @@ def load_raw_images(input_dir: Path) -> Tuple[np.ndarray, List[dict]]:
         with open(meta_path) as f:
             meta = json.load(f)
 
-        filter_pos = meta.get("filter_position", meta.get("filter", {}).get("position"))
+        # Capture metadata formats: flat keys, or nested under
+        # acquisition_settings (coordinator missions since 2026-03)
+        acq = meta.get("acquisition_settings", {})
+        filter_pos = meta.get(
+            "filter_position", acq.get("filter_position")
+        )
         if filter_pos is None:
             logger.warning("No filter_position in %s, skipping", meta_path.name)
             continue
 
-        if filter_pos == 0:
-            logger.info("Skipping filter position 0 (clear/open): %s", tiff_path.name)
+        if filter_pos not in filter_wavelengths:
+            raise ValueError(
+                f"{meta_path.name}: filter position {filter_pos} is not "
+                f"defined in filter_specifications.json (defined: "
+                f"{sorted(filter_wavelengths)})"
+            )
+
+        if filter_wavelengths[filter_pos] is None:
+            logger.info(
+                "Skipping filter position %d (clear/open): %s",
+                filter_pos, tiff_path.name,
+            )
             continue
 
-        exposure_ms = meta.get("exposure_ms", meta.get("exposure", {}).get("duration_ms"))
+        exposure_ms = meta.get(
+            "exposure_ms", acq.get("exposure_time_ms")
+        )
         if exposure_ms is None:
             logger.warning("No exposure_ms in %s, skipping", meta_path.name)
             continue
@@ -123,12 +156,25 @@ def load_raw_images(input_dir: Path) -> Tuple[np.ndarray, List[dict]]:
         img = np.array(Image.open(tiff_path), dtype=np.float64)
         band_images.append((filter_pos, img, exposure_ms, meta))
 
+    if not band_images:
+        raise ValueError(f"No usable bandpass captures found in {input_dir}")
+
     band_images.sort(key=lambda x: x[0])
 
     positions = [b[0] for b in band_images]
-    expected = list(range(1, 16))
+    if len(set(positions)) != len(positions):
+        raise ValueError(
+            f"Duplicate filter positions in {input_dir}: {positions}"
+        )
+    expected = sorted(
+        pos for pos, wl in filter_wavelengths.items() if wl is not None
+    )
     if positions != expected:
-        logger.warning("Expected filter positions %s, got %s", expected, positions)
+        missing = sorted(set(expected) - set(positions))
+        logger.warning(
+            "Incomplete filter set: expected positions %s, got %s "
+            "(missing %s)", expected, positions, missing,
+        )
 
     rows, cols = band_images[0][1].shape[:2]
     cube = np.zeros((rows, cols, len(band_images)), dtype=np.float64)
@@ -138,9 +184,12 @@ def load_raw_images(input_dir: Path) -> Tuple[np.ndarray, List[dict]]:
         cube[:, :, i] = img
         metadata_list.append({
             "filter_position": pos,
-            "wavelength_nm": FILTER_WAVELENGTHS_NM[i] if i < NUM_BANDS else None,
+            "wavelength_nm": filter_wavelengths[pos],
             "exposure_ms": exp_ms,
-            "source_file": meta.get("source_file", ""),
+            "source_file": meta.get(
+                "source_file",
+                meta.get("image_info", {}).get("filename", ""),
+            ),
         })
 
     logger.info("Loaded %d bands, image size %d x %d", len(band_images), rows, cols)
@@ -153,7 +202,7 @@ def load_raw_images(input_dir: Path) -> Tuple[np.ndarray, List[dict]]:
 
 def segment_panel(
     cube: np.ndarray,
-    band_index: int = DEFAULT_PANEL_BAND,
+    band_index: int,
     percentile: int = DEFAULT_PANEL_PERCENTILE,
     erosion_pixels: int = DEFAULT_PANEL_EROSION,
 ) -> np.ndarray:
@@ -164,7 +213,8 @@ def segment_panel(
     cube : np.ndarray
         Exposure-normalized image cube.
     band_index : int
-        Band to use for thresholding (default 2 = 550nm).
+        Band to use for thresholding (select by wavelength via
+        ``nearest_band_index``).
     percentile : int
         Intensity percentile for bright threshold.
     erosion_pixels : int
@@ -294,47 +344,54 @@ def calibrate_reflectance(
 
     for i in range(nb):
         exp_ms = band_metadata[i]["exposure_ms"]
+        wavelength_nm = band_metadata[i]["wavelength_nm"]
         dn_per_ms = cube[:, :, i] / exp_ms
 
         panel_mean = dn_per_ms[panel_mask].mean()
         shadow_mean = dn_per_ms[shadow_mask].mean()
         denom = panel_mean - shadow_mean
 
-        if abs(denom) < 1e-10:
-            logger.warning(
-                "Band %d (%dnm): panel-shadow difference near zero, skipping",
-                i, band_metadata[i].get("wavelength_nm", 0),
+        # One cal_bands entry per cube band, always: downstream consumers
+        # map band index -> wavelength through this list, so it must stay
+        # aligned with the cube's band axis even for failed bands.
+        valid = bool(abs(denom) >= 1e-10)
+        if valid:
+            refl_cube[:, :, i] = (
+                panel_reflectance * (dn_per_ms - shadow_mean) / denom
             )
-            continue
-
-        refl_cube[:, :, i] = panel_reflectance * (dn_per_ms - shadow_mean) / denom
+        else:
+            logger.warning(
+                "Band %d (%.0fnm): panel-shadow difference near zero, "
+                "band left as zeros", i, wavelength_nm,
+            )
 
         cal_bands.append({
             "filter_position": band_metadata[i]["filter_position"],
-            "wavelength_nm": band_metadata[i]["wavelength_nm"],
+            "wavelength_nm": wavelength_nm,
             "exposure_ms": exp_ms,
+            "valid": valid,
             "panel_dn_per_ms": float(panel_mean),
             "shadow_dn_per_ms": float(shadow_mean),
             "panel_reflectance": float(panel_reflectance),
-            "shadow_reflectance": float(
-                panel_reflectance * (shadow_mean - shadow_mean) / denom
-            ),
+            "shadow_reflectance": 0.0,
         })
 
-        logger.info(
-            "Band %d (%dnm): panel=%.1f, shadow=%.1f DN/ms, range=[%.3f, %.3f]",
-            i, band_metadata[i]["wavelength_nm"],
-            panel_mean, shadow_mean,
-            refl_cube[:, :, i].min(), refl_cube[:, :, i].max(),
-        )
+        if valid:
+            logger.info(
+                "Band %d (%.0fnm): panel=%.1f, shadow=%.1f DN/ms, range=[%.3f, %.3f]",
+                i, wavelength_nm,
+                panel_mean, shadow_mean,
+                refl_cube[:, :, i].min(), refl_cube[:, :, i].max(),
+            )
 
+    wavelengths_nm = [b["wavelength_nm"] for b in band_metadata]
     calibration_metadata = {
         "bands": cal_bands,
-        "wavelengths_nm": FILTER_WAVELENGTHS_NM,
+        "wavelengths_nm": wavelengths_nm,
         "shape": list(refl_cube.shape),
         "description": (
             f"Approximate reflectance hypercube, {nb} bands "
-            f"({FILTER_WAVELENGTHS_NM[0]}-{FILTER_WAVELENGTHS_NM[-1]}nm)"
+            f"({min(wavelengths_nm):.0f}-{max(wavelengths_nm):.0f}nm)"
         ),
         "calibration": (
             f"shadow-subtracted, Spectralon-normalized "
@@ -346,19 +403,25 @@ def calibrate_reflectance(
     return refl_cube, calibration_metadata
 
 
-def save_reflectance_bands(cube: np.ndarray, output_dir: Path) -> None:
+def save_reflectance_bands(
+    cube: np.ndarray,
+    wavelengths_nm: List[float],
+    output_dir: Path,
+) -> None:
     """Save individual reflectance bands as uint16 TIFFs scaled by 10000."""
     bands_dir = output_dir / "reflectance_bands"
     bands_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, wl in enumerate(FILTER_WAVELENGTHS_NM):
+    for i, wl in enumerate(wavelengths_nm):
         band = cube[:, :, i]
         scaled = np.clip(band * REFLECTANCE_SCALE_FACTOR, 0, 65535).astype(np.uint16)
         img = Image.fromarray(scaled)
-        path = bands_dir / f"refl_{wl:04d}nm.tiff"
+        path = bands_dir / f"refl_{wl:04.0f}nm.tiff"
         img.save(str(path))
 
-    logger.info("Saved %d reflectance band TIFFs to %s", NUM_BANDS, bands_dir)
+    logger.info(
+        "Saved %d reflectance band TIFFs to %s", len(wavelengths_nm), bands_dir
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -371,15 +434,19 @@ def run_calibration(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    filter_wavelengths = load_filter_wavelengths(args.filter_config)
+
     logger.info("Loading raw images from %s", input_dir)
-    raw_cube, band_metadata = load_raw_images(input_dir)
+    raw_cube, band_metadata = load_raw_images(input_dir, filter_wavelengths)
+    wavelengths_nm = [b["wavelength_nm"] for b in band_metadata]
 
     # Build exposure-normalized cube for segmentation
     exp_times = np.array([b["exposure_ms"] for b in band_metadata])
     cube_norm = raw_cube / exp_times[np.newaxis, np.newaxis, :]
 
     logger.info("Segmenting Spectralon panel")
-    panel_mask = segment_panel(cube_norm)
+    panel_band = nearest_band_index(wavelengths_nm, DEFAULT_PANEL_WAVELENGTH_NM)
+    panel_mask = segment_panel(cube_norm, band_index=panel_band)
 
     logger.info("Segmenting shadow regions")
     shadow_mask = segment_shadow(
@@ -409,10 +476,12 @@ def run_calibration(args: argparse.Namespace) -> None:
     logger.info("Saved calibration metadata: %s", meta_path)
 
     # Save per-band TIFFs
-    save_reflectance_bands(refl_cube, output_dir)
+    save_reflectance_bands(refl_cube, wavelengths_nm, output_dir)
 
     # Save diagnostic overlay
-    idx_r, idx_g, idx_b = 4, 2, 0  # 650, 550, 450nm
+    idx_r = nearest_band_index(wavelengths_nm, 650)
+    idx_g = nearest_band_index(wavelengths_nm, 550)
+    idx_b = nearest_band_index(wavelengths_nm, 450)
     rgb = np.stack([
         refl_cube[:, :, idx_r],
         refl_cube[:, :, idx_g],
@@ -467,7 +536,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shadow-min-bands", type=int,
         default=DEFAULT_SHADOW_MIN_BANDS,
-        help=f"Minimum bands below threshold for shadow (default: {DEFAULT_SHADOW_MIN_BANDS}/{NUM_BANDS}).",
+        help=f"Minimum bands below threshold for shadow (default: {DEFAULT_SHADOW_MIN_BANDS}).",
+    )
+    parser.add_argument(
+        "--filter-config", type=str, default=None,
+        help="Path to filter_specifications.json "
+             "(default: project config directory).",
     )
 
     return parser.parse_args()

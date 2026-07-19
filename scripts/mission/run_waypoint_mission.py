@@ -93,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         "--stop-on-error", action="store_true",
         help="Stop mission on first error"
     )
+    parser.add_argument(
+        "--output-format", type=str, default="netcdf",
+        choices=["netcdf", "legacy"],
+        help="Output format: netcdf (single file per position) or legacy "
+             "(TIFF+JPEG+JSON per band) (default: netcdf)"
+    )
 
     return parser.parse_args()
 
@@ -170,8 +176,8 @@ def main():
             baudrate=args.baudrate,
             pan_speed=1000,
             tilt_speed=1000,
-            hold_power_mode=PowerMode.REGULAR,
-            move_power_mode=PowerMode.HIGH,
+            hold_power_mode=PowerMode.LOW,
+            move_power_mode=PowerMode.LOW,
         )
 
         # Create coordinator
@@ -180,6 +186,7 @@ def main():
             fli_system=fli_system,
             output_dir=args.output,
             session_logger=session_logger,
+            output_format=args.output_format,
         )
 
         # Initialize PTU

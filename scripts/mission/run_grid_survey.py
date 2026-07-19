@@ -129,6 +129,18 @@ def parse_args() -> argparse.Namespace:
              "filter, then use those exposures for all positions"
     )
     parser.add_argument(
+        "--auto-expose-pan", type=float, default=None,
+        metavar="DEG",
+        help="Pan angle (degrees) for auto-expose position. "
+             "Overrides grid center. Requires --auto-expose-tilt."
+    )
+    parser.add_argument(
+        "--auto-expose-tilt", type=float, default=None,
+        metavar="DEG",
+        help="Tilt angle (degrees) for auto-expose position. "
+             "Overrides grid center. Requires --auto-expose-pan."
+    )
+    parser.add_argument(
         "--target-temp", type=float, default=-20.0,
         help="CCD target temperature in C (default: -20)"
     )
@@ -161,6 +173,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stop-on-error", action="store_true",
         help="Stop sequence on first error"
+    )
+    parser.add_argument(
+        "--output-format", type=str, default="netcdf",
+        choices=["netcdf", "legacy"],
+        help="Output format: netcdf (single file per position) or legacy "
+             "(TIFF+JPEG+JSON per band) (default: netcdf)"
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume an interrupted survey of the same name, skipping "
+             "positions recorded in its checkpoint file"
+    )
+    parser.add_argument(
+        "--scene-range-m", type=float, default=None,
+        help="Assumed scene distance in meters for the az/el backplane "
+             "parallax correction (camera lever arm off the PTU axes); "
+             "default: infinity (no parallax)"
+    )
+    parser.add_argument(
+        "--backplanes", type=str, default="subsampled",
+        choices=["subsampled", "full", "none"],
+        help="Az/el pointing backplanes written to each NetCDF: "
+             "subsampled grid (default), full resolution, or none"
+    )
+    parser.add_argument(
+        "--max-duration-min", type=float, default=None,
+        help="Mission watchdog: abort to a safe state if the survey runs "
+             "longer than this many minutes (default: no limit)"
     )
 
     args = parser.parse_args()
@@ -197,6 +237,15 @@ def parse_args() -> argparse.Namespace:
                 "Manual mode requires --pan-range, --tilt-range, "
                 "--pan-steps, and --tilt-steps"
             )
+
+    # Validate auto-expose position (must specify both or neither)
+    ae_pan = args.auto_expose_pan is not None
+    ae_tilt = args.auto_expose_tilt is not None
+    if ae_pan != ae_tilt:
+        parser.error(
+            "--auto-expose-pan and --auto-expose-tilt must be "
+            "specified together"
+        )
 
     return args
 
@@ -248,6 +297,11 @@ def main():
         print(f"  Total captures: {total_captures}")
         if args.auto_expose:
             print(f"  Exposure: AUTO (initial estimate {args.exposure} ms)")
+            if args.auto_expose_pan is not None:
+                print(f"  Auto-expose at: pan={args.auto_expose_pan}, "
+                      f"tilt={args.auto_expose_tilt} deg")
+            else:
+                print(f"  Auto-expose at: grid center")
         else:
             print(f"  Exposure: {args.exposure} ms")
         print(f"  Output: {args.output}")
@@ -280,6 +334,11 @@ def main():
         print(f"  Total captures: {total_captures}")
         if args.auto_expose:
             print(f"  Exposure: AUTO (initial estimate {args.exposure} ms)")
+            if args.auto_expose_pan is not None:
+                print(f"  Auto-expose at: pan={args.auto_expose_pan}, "
+                      f"tilt={args.auto_expose_tilt} deg")
+            else:
+                print(f"  Auto-expose at: grid center")
         else:
             print(f"  Exposure: {args.exposure} ms")
         print(f"  Output: {args.output}")
@@ -290,6 +349,11 @@ def main():
     sequence.continue_on_error = not args.stop_on_error
     sequence.inter_position_delay_s = args.inter_position_delay
     sequence.auto_expose_center = args.auto_expose
+
+    # Override auto-expose position if explicitly specified
+    if args.auto_expose_pan is not None:
+        sequence.center_pan_deg = args.auto_expose_pan
+        sequence.center_tilt_deg = args.auto_expose_tilt
 
     # Setup logging
     session_logger = SessionLogger(
@@ -313,8 +377,8 @@ def main():
             baudrate=args.baudrate,
             pan_speed=1000,
             tilt_speed=1000,
-            hold_power_mode=PowerMode.REGULAR,
-            move_power_mode=PowerMode.HIGH,
+            hold_power_mode=PowerMode.LOW,
+            move_power_mode=PowerMode.LOW,
         )
 
         # Create coordinator
@@ -323,6 +387,10 @@ def main():
             fli_system=fli_system,
             output_dir=args.output,
             session_logger=session_logger,
+            output_format=args.output_format,
+            lens_id=args.lens,
+            scene_range_m=args.scene_range_m,
+            backplanes=args.backplanes,
         )
 
         # Initialize PTU
@@ -333,7 +401,10 @@ def main():
 
         # Execute sequence
         print(f"Starting grid survey with {total_positions} positions...")
-        summary = coordinator.execute_sequence(sequence)
+        if args.max_duration_min is not None:
+            sequence.max_duration_s = args.max_duration_min * 60.0
+
+        summary = coordinator.execute_sequence(sequence, resume=args.resume)
 
         # Print summary
         print()

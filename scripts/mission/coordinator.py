@@ -22,14 +22,28 @@ from dataclasses import dataclass
 from enum import Enum
 
 from fli import FLISystem
+from fli.config import find_config_dir
 from ptu import PTUController, PTUConfig
 from ptu.logger import SessionLogger, OperationTimer
-from scripts.capture.auto_expose import auto_expose, AutoExposeResult
+from fli.auto_expose import auto_expose, AutoExposeResult
 
 try:
     from PIL import Image
 except ImportError:
     Image = None
+
+try:
+    from fli.io.netcdf import MultispectralNetCDF
+    _NETCDF_AVAILABLE = True
+except ImportError:
+    MultispectralNetCDF = None
+    _NETCDF_AVAILABLE = False
+
+
+class OutputFormat(Enum):
+    """Output file format for captured images."""
+    NETCDF = "netcdf"
+    LEGACY = "legacy"
 
 
 class SequenceStatus(Enum):
@@ -118,6 +132,12 @@ class SequenceConfig:
         If True, run auto-exposure at the center grid position before
         starting the sequence. The optimal exposure for each filter is
         stored in per_filter_exposure_ms and used for all positions.
+    center_pan_deg : float, optional
+        Pan coordinate of the grid center in degrees, used for auto-expose
+        positioning. If None, the centroid of all positions is used.
+    center_tilt_deg : float, optional
+        Tilt coordinate of the grid center in degrees, used for auto-expose
+        positioning. If None, the centroid of all positions is used.
     per_filter_exposure_ms : dict of {int: int}, optional
         Per-filter exposure times in milliseconds. Populated automatically
         when auto_expose_center is True, or can be set manually. If a
@@ -128,16 +148,23 @@ class SequenceConfig:
         Whether to continue the sequence if a single position fails.
     return_to_start : bool
         Whether to return to the first position after completing the sequence.
+    max_duration_s : float, optional
+        Mission watchdog: if the sequence runs longer than this, it is
+        aborted into a safe state rather than left running unattended.
+        None disables the watchdog.
     """
     sequence_name: str
     positions: List[PositionTarget]
     filter_positions: Optional[List[int]] = None
     exposure_ms: int = 100
     auto_expose_center: bool = False
+    center_pan_deg: Optional[float] = None
+    center_tilt_deg: Optional[float] = None
     per_filter_exposure_ms: Optional[Dict[int, int]] = None
     inter_position_delay_s: float = 0.0
     continue_on_error: bool = True
     return_to_start: bool = True
+    max_duration_s: Optional[float] = None
 
 
 class PayloadCoordinator:
@@ -160,12 +187,38 @@ class PayloadCoordinator:
 
     def __init__(self, ptu_config: PTUConfig, fli_system: FLISystem,
                  output_dir: str = "./out",
-                 session_logger: Optional[SessionLogger] = None):
+                 session_logger: Optional[SessionLogger] = None,
+                 output_format: str = "netcdf",
+                 lens_id: Optional[str] = None,
+                 scene_range_m: Optional[float] = None,
+                 backplanes: str = "subsampled"):
         self.ptu = PTUController(ptu_config)
         self.fli = fli_system
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = session_logger or SessionLogger()
+        self.lens_id = lens_id
+        self.scene_range_m = scene_range_m
+        self.backplanes = backplanes
+
+        # Output format selection
+        if output_format == "netcdf" and _NETCDF_AVAILABLE:
+            self.output_format = OutputFormat.NETCDF
+        elif output_format == "netcdf" and not _NETCDF_AVAILABLE:
+            self.logger.logger.warning(
+                "netCDF4 not installed, falling back to legacy output"
+            )
+            self.output_format = OutputFormat.LEGACY
+        else:
+            self.output_format = OutputFormat.LEGACY
+
+        # Pre-load configs for NetCDF metadata embedding
+        self._filter_config: Optional[Dict[str, Any]] = None
+        self._camera_config: Optional[Dict[str, Any]] = None
+        self._lens_config: Optional[Dict[str, Any]] = None
+        self._mount_config: Optional[Dict[str, Any]] = None
+        if self.output_format == OutputFormat.NETCDF:
+            self._load_configs()
 
         self.status = SequenceStatus.IDLE
         self.current_sequence: Optional[SequenceConfig] = None
@@ -180,6 +233,39 @@ class PayloadCoordinator:
         self.on_sequence_complete: Optional[
             Callable[[SequenceConfig, List[Dict[str, Any]]], None]
         ] = None
+
+    def _load_configs(self) -> None:
+        """Load filter, camera, and lens configuration files for NetCDF metadata."""
+        try:
+            config_dir = find_config_dir()
+        except FileNotFoundError as e:
+            self.logger.logger.warning(f"Config directory not found: {e}")
+            return
+        for name, attr in [
+            ("filter_specifications.json", "_filter_config"),
+            ("camera_specifications.json", "_camera_config"),
+            ("lens_specifications.json", "_lens_config"),
+        ]:
+            filepath = config_dir / name
+            if filepath.exists():
+                try:
+                    with open(filepath, 'r') as f:
+                        setattr(self, attr, json.load(f))
+                except (json.JSONDecodeError, OSError) as e:
+                    self.logger.logger.warning(
+                        "Could not load config %s: %s", name, e
+                    )
+
+        # Mount geometry (camera lever arm) for pointing backplanes
+        ptu_spec_path = config_dir / "ptu_specifications.json"
+        if ptu_spec_path.exists():
+            try:
+                with open(ptu_spec_path, 'r') as f:
+                    self._mount_config = json.load(f).get("mount_geometry")
+            except (json.JSONDecodeError, OSError) as e:
+                self.logger.logger.warning(
+                    "Could not load ptu_specifications.json: %s", e
+                )
 
     def initialize(self) -> bool:
         """Initialize PTU (assumes FLI system is already initialized).
@@ -221,6 +307,101 @@ class PayloadCoordinator:
 
         self.ptu.disconnect()
         self.logger.close_session()
+
+    def _enter_safe_state(self, reason: str) -> None:
+        """Bring the hardware to a known-safe state after a fault or abort.
+
+        Halts the PTU (with confirmation that the axes stopped), closes
+        the camera's mechanical shutter, and logs the terminal position.
+        Best-effort: each step is independent so one failure does not
+        prevent the others, and this method never raises.
+
+        Parameters
+        ----------
+        reason : str
+            Why the safe state was entered (for the session log).
+        """
+        self.logger.logger.warning(f"Entering safe state: {reason}")
+
+        try:
+            if self.ptu.halt():
+                pan, tilt = self.ptu.get_position()
+                self.logger.logger.info(
+                    f"Safe state: PTU halted at Pan={pan}, Tilt={tilt}"
+                )
+            else:
+                self.logger.logger.error(
+                    "Safe state: PTU halt NOT confirmed — axes may still "
+                    "be moving"
+                )
+        except Exception as e:
+            self.logger.logger.error(f"Safe state: PTU halt failed: {e}")
+
+        try:
+            if self.fli.camera is not None:
+                self.fli.camera.control_shutter(open_shutter=False)
+                self.logger.logger.info("Safe state: camera shutter closed")
+        except Exception as e:
+            self.logger.logger.error(
+                f"Safe state: shutter close failed: {e}"
+            )
+
+    # ------------------------------------------------------------------
+    # Mission checkpointing
+    # ------------------------------------------------------------------
+
+    def _checkpoint_path(self, sequence_name: str) -> Path:
+        """Return the checkpoint file path for a sequence."""
+        return self.output_dir / f"{sequence_name}_checkpoint.json"
+
+    def _write_checkpoint(self, sequence_name: str,
+                          completed_ids: List[str]) -> None:
+        """Persist the list of successfully completed position ids.
+
+        Written after every position so a crashed or killed mission can
+        resume from the last completed position. Best-effort: a failed
+        checkpoint write is logged but does not interrupt the mission.
+        """
+        checkpoint = {
+            "sequence_name": sequence_name,
+            "completed_position_ids": completed_ids,
+            "updated": datetime.now().isoformat(),
+        }
+        try:
+            with open(self._checkpoint_path(sequence_name), 'w') as f:
+                json.dump(checkpoint, f, indent=2)
+        except OSError as e:
+            self.logger.logger.warning(f"Checkpoint write failed: {e}")
+
+    def _load_checkpoint(self, sequence_name: str) -> List[str]:
+        """Load completed position ids from a prior run's checkpoint.
+
+        Returns an empty list if there is no checkpoint or it belongs to
+        a different sequence.
+        """
+        path = self._checkpoint_path(sequence_name)
+        if not path.exists():
+            return []
+        try:
+            with open(path) as f:
+                checkpoint = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            self.logger.logger.warning(f"Checkpoint unreadable, ignoring: {e}")
+            return []
+
+        if checkpoint.get("sequence_name") != sequence_name:
+            self.logger.logger.warning(
+                "Checkpoint belongs to a different sequence, ignoring"
+            )
+            return []
+        return list(checkpoint.get("completed_position_ids", []))
+
+    def _clear_checkpoint(self, sequence_name: str) -> None:
+        """Remove the checkpoint file after successful completion."""
+        try:
+            self._checkpoint_path(sequence_name).unlink(missing_ok=True)
+        except OSError as e:
+            self.logger.logger.warning(f"Checkpoint cleanup failed: {e}")
 
     def execute_single_position(
         self, position: PositionTarget,
@@ -332,24 +513,109 @@ class PayloadCoordinator:
             if filter_positions is None:
                 filter_positions = [self.fli.get_filter_position()]
 
-            for filt_pos in filter_positions:
-                if self.status == SequenceStatus.ABORTED:
-                    break
+            # Get GPM metadata and CCD temperature for NetCDF
+            gpm_data = None
+            ccd_temp = None
+            if self.output_format == OutputFormat.NETCDF:
+                try:
+                    ccd_temp = self.fli.get_temperature()
+                except Exception:
+                    pass
+                if self.ptu.gpm is not None:
+                    try:
+                        gpm_data = self.ptu.gpm.get_metadata_snapshot()
+                    except Exception:
+                        pass
 
-                # Use per-filter exposure if available
-                filt_exposure = exposure_ms
-                if (self.current_sequence and
-                        self.current_sequence.per_filter_exposure_ms and
-                        filt_pos in self.current_sequence.per_filter_exposure_ms):
-                    filt_exposure = (
-                        self.current_sequence.per_filter_exposure_ms[filt_pos]
+            # Determine sequence name for filenames
+            seq_name = (
+                self.current_sequence.sequence_name
+                if self.current_sequence else "single"
+            )
+
+            if (self.output_format == OutputFormat.NETCDF and
+                    _NETCDF_AVAILABLE):
+                timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+                nc_filename = (
+                    f"{seq_name}_{position.id}_{timestamp}.nc"
+                )
+                nc_path = self.output_dir / nc_filename
+
+                # Encoder-derived pointing for the backplanes
+                actual_pan_deg = None
+                actual_tilt_deg = None
+                if self.ptu.pan_resolution and self.ptu.tilt_resolution:
+                    actual_pan_deg = (
+                        actual_pan * self.ptu.pan_resolution / 3600.0
+                    )
+                    actual_tilt_deg = (
+                        actual_tilt * self.ptu.tilt_resolution / 3600.0
                     )
 
-                capture_result = self._capture_at_filter(
-                    position, filt_pos, filt_exposure,
-                    actual_pan, actual_tilt
-                )
-                position_result["captures"].append(capture_result)
+                with MultispectralNetCDF(
+                    filepath=nc_path,
+                    position_id=position.id,
+                    pan_degrees=position.pan_degrees,
+                    tilt_degrees=position.tilt_degrees,
+                    pan_steps=actual_pan,
+                    tilt_steps=actual_tilt,
+                    sequence_name=seq_name,
+                    expected_bands=len(filter_positions),
+                    ccd_temperature_c=ccd_temp,
+                    geo_pointing=gpm_data,
+                    filter_config=self._filter_config,
+                    camera_config=self._camera_config,
+                    lens_config=self._lens_config,
+                    lens_id=self.lens_id,
+                    backplanes=self.backplanes,
+                    scene_range_m=self.scene_range_m,
+                    mount_config=self._mount_config,
+                    actual_pan_degrees=actual_pan_deg,
+                    actual_tilt_degrees=actual_tilt_deg,
+                ) as nc_writer:
+                    for filt_pos in filter_positions:
+                        if self.status == SequenceStatus.ABORTED:
+                            break
+
+                        filt_exposure = exposure_ms
+                        if (self.current_sequence and
+                                self.current_sequence.per_filter_exposure_ms and
+                                filt_pos in
+                                self.current_sequence.per_filter_exposure_ms):
+                            filt_exposure = (
+                                self.current_sequence
+                                .per_filter_exposure_ms[filt_pos]
+                            )
+
+                        capture_result = self._capture_at_filter(
+                            position, filt_pos, filt_exposure,
+                            actual_pan, actual_tilt,
+                            netcdf_writer=nc_writer,
+                        )
+                        position_result["captures"].append(capture_result)
+
+                    position_result["netcdf_file"] = str(nc_path)
+            else:
+                # Legacy output path (TIFF + JPEG + JSON)
+                for filt_pos in filter_positions:
+                    if self.status == SequenceStatus.ABORTED:
+                        break
+
+                    filt_exposure = exposure_ms
+                    if (self.current_sequence and
+                            self.current_sequence.per_filter_exposure_ms and
+                            filt_pos in
+                            self.current_sequence.per_filter_exposure_ms):
+                        filt_exposure = (
+                            self.current_sequence
+                            .per_filter_exposure_ms[filt_pos]
+                        )
+
+                    capture_result = self._capture_at_filter(
+                        position, filt_pos, filt_exposure,
+                        actual_pan, actual_tilt
+                    )
+                    position_result["captures"].append(capture_result)
 
             # Check if all captures succeeded
             all_ok = all(
@@ -371,7 +637,8 @@ class PayloadCoordinator:
 
     def _capture_at_filter(
         self, position: PositionTarget, filter_pos: int,
-        exposure_ms: int, pan_steps: int, tilt_steps: int
+        exposure_ms: int, pan_steps: int, tilt_steps: int,
+        netcdf_writer: Optional["MultispectralNetCDF"] = None,
     ) -> Dict[str, Any]:
         """Capture a single image at the specified filter position.
 
@@ -387,6 +654,9 @@ class PayloadCoordinator:
             Actual pan position in steps.
         tilt_steps : int
             Actual tilt position in steps.
+        netcdf_writer : MultispectralNetCDF, optional
+            If provided, writes the band to this NetCDF file instead of
+            saving individual TIFF/JPEG/JSON files.
 
         Returns
         -------
@@ -401,49 +671,86 @@ class PayloadCoordinator:
             "error_message": None,
         }
 
+        # Filter move + capture, with one retry: the acquisition layer
+        # already retries USB faults internally, but a filter wheel
+        # movement timeout surfaces here and is usually transient.
+        max_attempts = 2
+        image = None
+        capture_time = 0.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Move filter wheel
+                with OperationTimer(
+                    self.logger, "move_filter", "Camera",
+                    {"filter_position": filter_pos}
+                ) as timer:
+                    self.fli.move_filter(filter_pos)
+                    timer.mark_success()
+
+                # Capture image
+                capture_start = time.time()
+                with OperationTimer(
+                    self.logger, "capture", "Camera",
+                    {"position_id": position.id,
+                     "filter_position": filter_pos,
+                     "exposure_ms": exposure_ms}
+                ) as timer:
+                    image = self.fli.capture_image(exposure_ms=exposure_ms)
+                    timer.mark_success()
+                capture_time = time.time() - capture_start
+                break
+
+            except Exception as e:
+                if attempt < max_attempts:
+                    self.logger.logger.warning(
+                        f"Capture attempt {attempt}/{max_attempts} failed "
+                        f"at filter {filter_pos}: {e}; retrying"
+                    )
+                    time.sleep(1.0)
+                else:
+                    capture_result["error_message"] = str(e)
+                    self.logger.logger.error(
+                        f"Capture failed at filter {filter_pos} after "
+                        f"{max_attempts} attempts: {e}"
+                    )
+                    return capture_result
+
         try:
-            # Move filter wheel
-            with OperationTimer(
-                self.logger, "move_filter", "Camera",
-                {"filter_position": filter_pos}
-            ) as timer:
-                self.fli.move_filter(filter_pos)
-                timer.mark_success()
+            now = datetime.now()
 
-            # Capture image
-            capture_start = time.time()
-            with OperationTimer(
-                self.logger, "capture", "Camera",
-                {"position_id": position.id,
-                 "filter_position": filter_pos,
-                 "exposure_ms": exposure_ms}
-            ) as timer:
-                image = self.fli.capture_image(exposure_ms=exposure_ms)
-                timer.mark_success()
+            # Save via NetCDF writer or legacy files
+            if netcdf_writer is not None:
+                netcdf_writer.add_band(
+                    image=image,
+                    filter_position=filter_pos,
+                    exposure_ms=exposure_ms,
+                    capture_time=now,
+                )
+                capture_result["files"] = {
+                    "netcdf": str(netcdf_writer.filepath)
+                }
+            else:
+                sequence_name = (
+                    self.current_sequence.sequence_name
+                    if self.current_sequence else "single"
+                )
+                timestamp = now.strftime("%Y%m%dT%H%M%S")
+                base_name = (
+                    f"{sequence_name}_{position.id}"
+                    f"_F{filter_pos:02d}_{timestamp}"
+                )
 
-            capture_time = time.time() - capture_start
-
-            # Save image and metadata
-            sequence_name = (
-                self.current_sequence.sequence_name
-                if self.current_sequence else "single"
-            )
-            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-            base_name = (
-                f"{sequence_name}_{position.id}_F{filter_pos:02d}_{timestamp}"
-            )
-
-            saved_files = self._save_image(image, base_name)
-            metadata_file = self._save_metadata(
-                image, base_name, position, filter_pos,
-                exposure_ms, pan_steps, tilt_steps, capture_time
-            )
+                saved_files = self._save_image(image, base_name)
+                metadata_file = self._save_metadata(
+                    image, base_name, position, filter_pos,
+                    exposure_ms, pan_steps, tilt_steps, capture_time
+                )
+                capture_result["files"] = {
+                    **saved_files,
+                    "metadata": str(metadata_file),
+                }
 
             capture_result["success"] = True
-            capture_result["files"] = {
-                **saved_files,
-                "metadata": str(metadata_file),
-            }
             capture_result["capture_time_s"] = capture_time
             capture_result["image_stats"] = {
                 "shape": list(image.shape),
@@ -453,9 +760,11 @@ class PayloadCoordinator:
             }
 
         except Exception as e:
+            # Save-path failures (metadata lookup, disk) are not retried:
+            # recapturing would not fix them.
             capture_result["error_message"] = str(e)
             self.logger.logger.error(
-                f"Capture failed at filter {filter_pos}: {e}"
+                f"Saving capture at filter {filter_pos} failed: {e}"
             )
 
         return capture_result
@@ -625,41 +934,46 @@ class PayloadCoordinator:
             Auto-exposure results keyed by filter position.
         """
         positions = sequence_config.positions
-        center_idx = len(positions) // 2
-        center_pos = positions[center_idx]
+
+        # Determine the center coordinates for auto-exposure. Use explicit
+        # center if provided, otherwise compute the centroid of all positions.
+        if sequence_config.center_pan_deg is not None:
+            pan_center = sequence_config.center_pan_deg
+        else:
+            pan_center = sum(p.pan_degrees for p in positions) / len(positions)
+
+        if sequence_config.center_tilt_deg is not None:
+            tilt_center = sequence_config.center_tilt_deg
+        else:
+            tilt_center = sum(p.tilt_degrees for p in positions) / len(positions)
 
         filters = sequence_config.filter_positions or [
             self.fli.get_filter_position()
         ]
 
         self.logger.logger.info(
-            f"Auto-expose: moving to center position {center_pos.id} "
-            f"(pan={center_pos.pan_degrees}, tilt={center_pos.tilt_degrees})"
+            f"Auto-expose: moving to grid center "
+            f"(pan={pan_center:.4f}, tilt={tilt_center:.4f})"
         )
 
-        # Convert degrees to steps if needed
-        if center_pos.pan_steps is None or center_pos.tilt_steps is None:
-            if (self.ptu.pan_resolution is None or
-                    self.ptu.tilt_resolution is None):
-                raise RuntimeError(
-                    "PTU resolution not available for degree conversion"
-                )
-            # Resolution is in arcsec/step; convert degrees to steps
-            center_pos.pan_steps = int(
-                center_pos.pan_degrees * 3600.0 / self.ptu.pan_resolution
+        # Convert center degrees to steps
+        if (self.ptu.pan_resolution is None or
+                self.ptu.tilt_resolution is None):
+            raise RuntimeError(
+                "PTU resolution not available for degree conversion"
             )
-            center_pos.tilt_steps = int(
-                center_pos.tilt_degrees * 3600.0 / self.ptu.tilt_resolution
-            )
+        center_pan_steps = int(pan_center * 3600.0 / self.ptu.pan_resolution)
+        center_tilt_steps = int(tilt_center * 3600.0 / self.ptu.tilt_resolution)
 
         # Move to center
         if not self.ptu.move_to_position(
-            center_pos.pan_steps, center_pos.tilt_steps, wait=True
+            center_pan_steps, center_tilt_steps, wait=True
         ):
             raise RuntimeError("Failed to move to center position for auto-exposure")
 
-        if center_pos.settle_time_s > 0:
-            time.sleep(center_pos.settle_time_s)
+        settle_time = positions[0].settle_time_s if positions else 2.0
+        if settle_time > 0:
+            time.sleep(settle_time)
 
         # Run auto-exposure for each filter
         results: Dict[int, AutoExposeResult] = {}
@@ -706,17 +1020,26 @@ class PayloadCoordinator:
 
         return results
 
-    def execute_sequence(self, sequence_config: SequenceConfig) -> Dict[str, Any]:
+    def execute_sequence(self, sequence_config: SequenceConfig,
+                         resume: bool = False) -> Dict[str, Any]:
         """Execute a complete acquisition sequence.
 
         Iterates through all positions in the sequence, capturing images
         at each one. Supports pause/resume and abort operations via
-        the status flag.
+        the status flag. A checkpoint file is written after every
+        position; with ``resume=True`` positions already completed by a
+        prior (interrupted) run of the same sequence are skipped.
+
+        On any fault or abort the hardware is brought to a safe state
+        (PTU halted and confirmed stopped, shutter closed).
 
         Parameters
         ----------
         sequence_config : SequenceConfig
             Sequence definition including positions and capture parameters.
+        resume : bool
+            Skip positions recorded as completed in this sequence's
+            checkpoint file from a previous run.
 
         Returns
         -------
@@ -740,6 +1063,17 @@ class PayloadCoordinator:
 
         sequence_start_time = time.time()
 
+        completed_ids: List[str] = []
+        if resume:
+            completed_ids = self._load_checkpoint(
+                sequence_config.sequence_name
+            )
+            if completed_ids:
+                self.logger.logger.info(
+                    f"Resuming: {len(completed_ids)} positions already "
+                    f"completed, skipping them"
+                )
+
         self.logger.log_sequence_start(
             sequence_config.sequence_name,
             len(sequence_config.positions)
@@ -754,6 +1088,22 @@ class PayloadCoordinator:
                 if self.status != SequenceStatus.RUNNING:
                     break
 
+                # Mission watchdog: never run unattended past the deadline
+                if (sequence_config.max_duration_s is not None and
+                        time.time() - sequence_start_time >
+                        sequence_config.max_duration_s):
+                    self.logger.logger.error(
+                        f"Mission watchdog expired after "
+                        f"{sequence_config.max_duration_s:.0f}s at position "
+                        f"{i}/{len(sequence_config.positions)}"
+                    )
+                    self.status = SequenceStatus.ERROR
+                    self._enter_safe_state("mission watchdog expired")
+                    break
+
+                if position.id in completed_ids:
+                    continue
+
                 self.current_position_index = i
 
                 position_result = self.execute_single_position(
@@ -763,6 +1113,12 @@ class PayloadCoordinator:
                 )
 
                 self.sequence_results.append(position_result)
+
+                if position_result["success"]:
+                    completed_ids.append(position.id)
+                self._write_checkpoint(
+                    sequence_config.sequence_name, completed_ids
+                )
 
                 if (not position_result["success"] and
                         not sequence_config.continue_on_error):
@@ -787,10 +1143,14 @@ class PayloadCoordinator:
 
             if self.status == SequenceStatus.RUNNING:
                 self.status = SequenceStatus.COMPLETED
+                self._clear_checkpoint(sequence_config.sequence_name)
 
         except Exception as e:
             self.status = SequenceStatus.ERROR
-            self.logger.logger.error(f"Sequence execution failed: {e}")
+            self.logger.logger.error(
+                f"Sequence execution failed: {e}", exc_info=True
+            )
+            self._enter_safe_state("unhandled sequence exception")
 
         finally:
             sequence_duration = time.time() - sequence_start_time
@@ -831,7 +1191,10 @@ class PayloadCoordinator:
         """Pause the current sequence after the current position completes."""
         if self.status == SequenceStatus.RUNNING:
             self.status = SequenceStatus.PAUSED
-            self.ptu.halt()
+            if not self.ptu.halt():
+                self.logger.logger.error(
+                    "Pause: PTU halt not confirmed — axes may still be moving"
+                )
 
     def resume_sequence(self):
         """Resume a paused sequence."""
@@ -839,10 +1202,15 @@ class PayloadCoordinator:
             self.status = SequenceStatus.RUNNING
 
     def abort_sequence(self):
-        """Abort the current sequence immediately."""
+        """Abort the current sequence immediately and enter a safe state.
+
+        The PTU is halted (with confirmation) and the camera shutter is
+        closed. The sequence checkpoint is left in place so the mission
+        can be resumed with ``execute_sequence(..., resume=True)``.
+        """
         if self.status in (SequenceStatus.RUNNING, SequenceStatus.PAUSED):
             self.status = SequenceStatus.ABORTED
-            self.ptu.halt()
+            self._enter_safe_state("sequence aborted")
 
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive coordinator status.
@@ -941,6 +1309,8 @@ class PayloadCoordinator:
             positions=positions,
             filter_positions=filter_positions,
             exposure_ms=exposure_ms,
+            center_pan_deg=(pan_min + pan_max) / 2.0,
+            center_tilt_deg=(tilt_min + tilt_max) / 2.0,
         )
 
     @staticmethod
@@ -997,11 +1367,9 @@ class PayloadCoordinator:
             The configured sequence and a geometry summary dict containing
             FOV, step size, grid dimensions, and actual coverage.
         """
-        # Load lens specifications
+        # Load lens specifications (resolution honors TERRACAM_CONFIG)
         if config_path is None:
-            # Walk up from this file to find config/
-            project_root = Path(__file__).resolve().parent.parent.parent
-            config_path = project_root / "config" / "lens_specifications.json"
+            config_path = find_config_dir() / "lens_specifications.json"
         else:
             config_path = Path(config_path)
 
@@ -1077,6 +1445,8 @@ class PayloadCoordinator:
             positions=positions,
             filter_positions=filter_positions,
             exposure_ms=exposure_ms,
+            center_pan_deg=pan_center,
+            center_tilt_deg=tilt_center,
         )
 
         geometry = {
@@ -1211,14 +1581,14 @@ class PayloadCoordinator:
                 longitude=geo_target.longitude,
                 altitude=geo_target.altitude,
             )
-            self.logger.info(
+            self.logger.logger.info(
                 f"Geo-pointing to {geo_target.id}: "
                 f"lat={geo_target.latitude}, lon={geo_target.longitude}, "
                 f"alt={geo_target.altitude}"
             )
 
             if not self.ptu.gpm.point_to_coordinate(target, wait=True):
-                self.logger.error(
+                self.logger.logger.error(
                     f"Geo-pointing failed for {geo_target.id}"
                 )
                 result["error"] = "geo-pointing command failed"
@@ -1241,12 +1611,12 @@ class PayloadCoordinator:
             )
 
             # Capture at each filter
-            filters = filter_positions or [None]
+            pan_steps, tilt_steps = self.ptu.get_position()
+            filters = filter_positions or [self.fli.get_filter_position()]
             for filter_pos in filters:
                 capture_result = self._capture_at_filter(
-                    position=temp_position,
-                    filter_position=filter_pos,
-                    exposure_ms=exposure_ms,
+                    temp_position, filter_pos, exposure_ms,
+                    pan_steps, tilt_steps,
                 )
                 result["captures"].append(capture_result)
 
@@ -1255,7 +1625,7 @@ class PayloadCoordinator:
             result["tilt_degrees"] = tilt_deg
 
         except Exception as e:
-            self.logger.error(
+            self.logger.logger.error(
                 f"Error at geo target {geo_target.id}: {e}"
             )
             result["error"] = str(e)
@@ -1305,7 +1675,7 @@ class PayloadCoordinator:
                 "Geo Pointing Module hardware"
             )
 
-        self.logger.info(
+        self.logger.logger.info(
             f"Starting geo-sequence '{sequence_name}' with "
             f"{len(geo_targets)} targets"
         )
@@ -1315,7 +1685,7 @@ class PayloadCoordinator:
         successful = 0
 
         for i, geo_target in enumerate(geo_targets):
-            self.logger.info(
+            self.logger.logger.info(
                 f"Geo target {i + 1}/{len(geo_targets)}: {geo_target.id}"
             )
 
@@ -1329,7 +1699,7 @@ class PayloadCoordinator:
             if target_result["status"] == "success":
                 successful += 1
             elif not continue_on_error:
-                self.logger.error(
+                self.logger.logger.error(
                     f"Stopping geo-sequence on error at {geo_target.id}"
                 )
                 break
@@ -1350,7 +1720,7 @@ class PayloadCoordinator:
             "results": results,
         }
 
-        self.logger.info(
+        self.logger.logger.info(
             f"Geo-sequence '{sequence_name}' complete: "
             f"{successful}/{total} targets successful in {total_time:.1f}s"
         )

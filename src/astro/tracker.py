@@ -554,6 +554,12 @@ class CelestialTracker:
             f"{config.duration_s}s, interval={interval}s"
         )
 
+        # One transient fault (SPICE, PTU serial, USB) must not kill a
+        # long tracking session, but persistent failure means the
+        # hardware is gone — give up after a few consecutive faults.
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+
         while time.time() < end_time and not self._abort_requested:
             loop_start = time.time()
 
@@ -563,36 +569,53 @@ class CelestialTracker:
                 f"{config.duration_s}s elapsed"
             )
 
-            point_result = self.compute_and_point(config)
+            try:
+                point_result = self.compute_and_point(config)
 
-            # Check if target went below horizon
-            if (not point_result.az_el.is_above_horizon or
-                    point_result.az_el.elevation_deg <
-                    config.min_elevation_deg):
-                self.logger.warning(
-                    f"Target {config.target.name} below horizon/minimum "
-                    f"elevation (el={point_result.az_el.elevation_deg:.2f})"
-                )
+                # Check if target went below horizon
+                if (not point_result.az_el.is_above_horizon or
+                        point_result.az_el.elevation_deg <
+                        config.min_elevation_deg):
+                    self.logger.warning(
+                        f"Target {config.target.name} below horizon/minimum "
+                        f"elevation (el={point_result.az_el.elevation_deg:.2f})"
+                    )
+                    result.points.append(point_result)
+                    result.target_below_horizon = True
+                    break
+
+                # Capture if pointing succeeded
+                if point_result.success and point_result.ptu_moved:
+                    captures = self._capture_at_current_position(
+                        config, point_result.ptu_angles
+                    )
+                    point_result.captures = captures
+                    result.total_captures += sum(
+                        1 for c in captures if c.get("success")
+                    )
+
                 result.points.append(point_result)
-                result.target_below_horizon = True
-                break
+                if point_result.success:
+                    result.successful_points += 1
 
-            # Capture if pointing succeeded
-            if point_result.success and point_result.ptu_moved:
-                captures = self._capture_at_current_position(
-                    config, point_result.ptu_angles
+                if progress_callback:
+                    progress_callback(point_index, point_result)
+
+                consecutive_failures = 0
+
+            except Exception as e:
+                consecutive_failures += 1
+                self.logger.error(
+                    f"Tracking point {point_index} failed "
+                    f"({consecutive_failures}/{max_consecutive_failures} "
+                    f"consecutive): {e}"
                 )
-                point_result.captures = captures
-                result.total_captures += sum(
-                    1 for c in captures if c.get("success")
-                )
-
-            result.points.append(point_result)
-            if point_result.success:
-                result.successful_points += 1
-
-            if progress_callback:
-                progress_callback(point_index, point_result)
+                if consecutive_failures >= max_consecutive_failures:
+                    self.logger.error(
+                        "Aborting continuous tracking: repeated point "
+                        "failures"
+                    )
+                    break
 
             point_index += 1
 

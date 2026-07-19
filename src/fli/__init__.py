@@ -27,6 +27,9 @@ Modules:
     fli.core: Low-level camera and filter wheel control
     fli.acquisition: Robust image acquisition with error recovery
     fli.system: Unified device management
+    fli.auto_expose: Auto-exposure via binary search with quality scoring
+    fli.config: Project config file resolution (TERRACAM_CONFIG override)
+    fli.io: Output formats (multispectral NetCDF)
 """
 
 from .system import FLISystem
@@ -42,12 +45,21 @@ from .core import (
     FLIWarning,
 )
 
+# Optional I/O formats
+try:
+    from .io import MultispectralNetCDF
+except ImportError:
+    MultispectralNetCDF = None
+
 __version__ = "1.0.0"
 
 __all__ = [
     # High-level API
     'FLISystem',
     'ImageAcquisition',
+
+    # I/O formats (optional)
+    'MultispectralNetCDF',
 
     # Core device classes
     'USBCamera',

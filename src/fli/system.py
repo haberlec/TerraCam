@@ -117,8 +117,8 @@ class FLISystem:
             if level is None:
                 level = FLIDEBUG_WARN | FLIDEBUG_FAIL
             self.lib.FLISetDebugLevel(None, level)
-        except Exception:
-            pass  # Non-critical
+        except Exception as e:
+            self.logger.debug(f"FLISetDebugLevel failed (non-critical): {e}")
 
     def discover_devices(self, require_camera: bool = True,
                          require_filter_wheel: bool = True) -> bool:
@@ -235,15 +235,17 @@ class FLISystem:
         if self.camera:
             try:
                 self.camera.close()
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Camera close failed during reconnect: {e}")
             self.camera = None
 
         if self.filter_wheel:
             try:
                 self.filter_wheel.close()
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(
+                    f"Filter wheel close failed during reconnect: {e}"
+                )
             self.filter_wheel = None
 
         # Brief pause for USB reset
@@ -335,9 +337,30 @@ class FLISystem:
         start_time = time.time()
         timeout_seconds = timeout_minutes * 60
         stable_readings = 0
+        consecutive_read_failures = 0
+        max_read_failures = 5
 
         while time.time() - start_time < timeout_seconds:
-            current_temp = self.camera.get_temperature()
+            try:
+                current_temp = self.camera.get_temperature()
+            except Exception as e:
+                # A transient USB fault must not crash a stabilization
+                # wait, but persistent failures mean the camera is gone.
+                consecutive_read_failures += 1
+                self.logger.warning(
+                    f"Temperature read failed "
+                    f"({consecutive_read_failures}/{max_read_failures}): {e}"
+                )
+                if consecutive_read_failures >= max_read_failures:
+                    self.logger.error(
+                        "Temperature stabilization abandoned: camera "
+                        "unreachable"
+                    )
+                    return False
+                time.sleep(5)
+                continue
+
+            consecutive_read_failures = 0
             temp_diff = abs(current_temp - target_temp)
 
             self.logger.info(
@@ -486,15 +509,15 @@ class FLISystem:
         if self.camera:
             try:
                 self.camera.close()
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Camera close failed: {e}")
             self.camera = None
 
         if self.filter_wheel:
             try:
                 self.filter_wheel.close()
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Filter wheel close failed: {e}")
             self.filter_wheel = None
 
         self.acquisition = None

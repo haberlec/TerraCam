@@ -10,7 +10,7 @@
 __author__ = 'Craig Wm. Versek'
 __date__ = '2012-08-08'
 
-import sys, time, warnings, traceback
+import sys, time, warnings, traceback, logging
 
 try:
     from collections import OrderedDict
@@ -35,8 +35,12 @@ from .lib import FLILibrary, FLIError, FLIWarning, flidomain_t, flidev_t,\
 
 from .device import USBDevice
 ###############################################################################
+# DEBUG enables libfli C-level debug logging (see device.py); Python-level
+# diagnostics go through the module logger.
 DEBUG = False
 DEFAULT_BITDEPTH = '16bit'
+
+logger = logging.getLogger(__name__)
 ###############################################################################
 class USBCamera(USBDevice):
     #load the DLL
@@ -186,15 +190,16 @@ class USBCamera(USBDevice):
 
     def wait_for_idle(self, timeout_seconds=10):
         """Wait for camera to return to idle status before next operation.
-        
+
         Args:
             timeout_seconds: Maximum time to wait for idle status
-            
+
         Returns:
             bool: True if camera reached idle status, False if timeout
         """
         start_time = time.time()
-        
+        status_failures = 0
+
         while time.time() - start_time < timeout_seconds:
             try:
                 status = self.get_camera_status()
@@ -202,14 +207,22 @@ class USBCamera(USBDevice):
                     return True
                 # Sleep briefly before checking again
                 time.sleep(0.1)
-            except Exception:
-                # If status check fails, wait a bit more and continue
+            except FLIError as e:
+                # Transient USB faults during status polling are retried
+                # until the deadline, but never silently.
+                status_failures += 1
+                logger.warning(
+                    f"Camera status query failed during idle wait "
+                    f"({status_failures} so far): {e}"
+                )
                 time.sleep(0.2)
                 continue
-        
-        # Timeout reached
-        if DEBUG:
-            print(f"⚠️  Camera did not return to idle within {timeout_seconds}s")
+
+        logger.warning(
+            f"Camera did not return to idle within {timeout_seconds}s"
+            + (f" ({status_failures} status query failures)"
+               if status_failures else "")
+        )
         return False
 
     def set_exposure(self, exptime, frametype = "normal"):
@@ -221,9 +234,10 @@ class USBCamera(USBDevice):
         """
         # Wait for camera to be idle before changing exposure settings
         if not self.wait_for_idle(timeout_seconds=15):
-            if DEBUG:
-                print(f"⚠️  Warning: Camera not idle when setting exposure, continuing anyway")
-        
+            logger.warning(
+                "Camera not idle when setting exposure, continuing anyway"
+            )
+
         self.current_exposure_ms = exptime  # Store the exposure time
         exptime = c_long(exptime)        
         if frametype == "normal":
@@ -263,12 +277,15 @@ class USBCamera(USBDevice):
         try:
             self._libfli.FLISetBitDepth(self._dev, bitdepth_val)
             self.bitdepth = bitdepth
-            print(f"✅ Bit depth set to {bitdepth}")
+            logger.info(f"Bit depth set to {bitdepth}")
         except FLIError as e:
             msg = f"Camera does not support changing bit depth: {e}"
             warnings.warn(FLIWarning(msg, e))
             # Keep the current bit depth setting
-            print(f"⚠️  Bit depth change failed, keeping current setting: {self.bitdepth}")
+            logger.warning(
+                f"Bit depth change failed, keeping current setting: "
+                f"{self.bitdepth}"
+            )
 
     def take_photo(self):
         """Expose the frame, wait for completion, and fetch the image data.
@@ -294,8 +311,9 @@ class USBCamera(USBDevice):
 
         # Ensure camera is idle before starting exposure
         if not self.wait_for_idle(timeout_seconds=15):
-            if DEBUG:
-                print(f"⚠️  Warning: Camera not idle when starting exposure, continuing anyway")
+            logger.warning(
+                "Camera not idle when starting exposure, continuing anyway"
+            )
 
         # Override frame type to DARK so firmware does not touch the shutter
         result = self._libfli.FLISetFrameType(
@@ -320,8 +338,7 @@ class USBCamera(USBDevice):
 
         # Ensure camera returns to idle after image fetch
         if not self.wait_for_idle(timeout_seconds=5):
-            if DEBUG:
-                print(f"⚠️  Warning: Camera not idle after image fetch")
+            logger.warning("Camera not idle after image fetch")
 
         return image
 
@@ -337,8 +354,10 @@ class USBCamera(USBDevice):
         """
         # Ensure camera is idle before starting exposure
         if not self.wait_for_idle(timeout_seconds=15):
-            if DEBUG:
-                print(f"⚠️  Warning: Camera not idle when starting dark exposure, continuing anyway")
+            logger.warning(
+                "Camera not idle when starting dark exposure, "
+                "continuing anyway"
+            )
 
         # Set DARK frame type - firmware handles shutter (keeps it closed)
         result = self._libfli.FLISetFrameType(self._dev, fliframe_t(FLI_FRAME_TYPE_DARK))
@@ -353,8 +372,7 @@ class USBCamera(USBDevice):
 
         # Ensure camera returns to idle after image fetch
         if not self.wait_for_idle(timeout_seconds=5):
-            if DEBUG:
-                print(f"⚠️  Warning: Camera not idle after dark image fetch")
+            logger.warning("Camera not idle after dark image fetch")
 
         return image
 
@@ -401,44 +419,48 @@ class USBCamera(USBDevice):
 
         max_wait_time = wait_time+30
 
-        # Phase 2: Smart polling based on camera state
-        poll_count = 0
+        # Phase 2: Smart polling based on camera state. The loop is
+        # bounded by max_wait_time; a stuck camera raises FLIError.
         last_status = None
         readout_start_time = None
-        
+
         while True:
             elapsed = time.time() - start_time
             if elapsed > max_wait_time:
-                raise FLIError(f"Exposure timeout: exceeded {max_wait_time:.1f}s waiting for completion")
-            
+                raise FLIError(
+                    f"Exposure timeout: exceeded {max_wait_time:.1f}s "
+                    f"waiting for completion (last status: {last_status})"
+                )
+
             status = self.get_camera_status()
-            
+
             # Log status changes for debugging
             if status != last_status:
                 status_names = {
                     FLI_CAMERA_STATUS_IDLE: "IDLE",
-                    FLI_CAMERA_STATUS_WAITING_FOR_TRIGGER: "WAITING_FOR_TRIGGER", 
+                    FLI_CAMERA_STATUS_WAITING_FOR_TRIGGER: "WAITING_FOR_TRIGGER",
                     FLI_CAMERA_STATUS_EXPOSING: "EXPOSING",
                     FLI_CAMERA_STATUS_READING_CCD: "READING_CCD"
                 }
-                if DEBUG:
-                    print(f"   Camera status: {status_names.get(status, f'UNKNOWN({status})')}")
-                
+                logger.debug(
+                    "Camera status: %s",
+                    status_names.get(status, f"UNKNOWN({status})"),
+                )
+
                 # Track when readout phase begins
                 if status == FLI_CAMERA_STATUS_READING_CCD and readout_start_time is None:
                     readout_start_time = time.time()
-                
+
                 last_status = status
-            
+
             if status == FLI_CAMERA_STATUS_IDLE:
                 # Camera has completed exposure and readout
                 break
             elif status == FLI_CAMERA_STATUS_EXPOSING:
                 # Still exposing - wait longer between polls
                 time.sleep(0.2)
-                poll_count += 1
             elif status == FLI_CAMERA_STATUS_READING_CCD:
-                # Reading CCD - use conservative readout timing 
+                # Reading CCD - use conservative readout timing
                 if readout_start_time:
                     readout_elapsed = (time.time() - readout_start_time) * 1000  # Convert to ms
                     if readout_elapsed < CONSERVATIVE_READOUT_TIME_MS * 0.8:  # Still early in readout
@@ -447,19 +469,12 @@ class USBCamera(USBDevice):
                         time.sleep(0.05)  # More frequent polling near completion
                 else:
                     time.sleep(0.1)
-                poll_count += 1
             elif status == FLI_CAMERA_STATUS_WAITING_FOR_TRIGGER:
                 # Waiting for trigger - check frequently
                 time.sleep(0.05)
-                poll_count += 1
             else:
                 # Unknown status - wait briefly and continue
                 time.sleep(0.05)
-                poll_count += 1
-            
-            # Safety check to prevent infinite polling
-            if poll_count > 2000:  # Increased limit for more robust operation
-                raise FLIError(f"Excessive polling: camera stuck in status {status}")
     
     def fetch_image(self):
         """ Fetch the image data for the last exposure.
@@ -507,8 +522,9 @@ class USBCamera(USBDevice):
         """
         READOUT_SAFETY_BUFFER_MS = 150  # Conservative buffer from timing measurements
 
-        if DEBUG:
-            print(f"   Waiting {READOUT_SAFETY_BUFFER_MS}ms post-acquisition buffer...")
+        logger.debug(
+            "Waiting %dms post-acquisition buffer", READOUT_SAFETY_BUFFER_MS
+        )
 
         # Wait the buffer time
         time.sleep(READOUT_SAFETY_BUFFER_MS / 1000.0)
@@ -516,11 +532,10 @@ class USBCamera(USBDevice):
         # Verify camera is truly idle after buffer wait
         max_idle_wait = 2.0  # Max 2 seconds to reach idle after buffer
         if not self.wait_for_idle(timeout_seconds=max_idle_wait):
-            if DEBUG:
-                print(f"⚠️  Warning: Camera not idle after {READOUT_SAFETY_BUFFER_MS}ms buffer + {max_idle_wait}s wait")
-        else:
-            if DEBUG:
-                print(f"   ✅ Camera confirmed idle after buffer wait")
+            logger.warning(
+                f"Camera not idle after {READOUT_SAFETY_BUFFER_MS}ms buffer "
+                f"+ {max_idle_wait}s wait"
+            )
 
     # =========================================================================
     # Video Mode Methods
@@ -541,8 +556,7 @@ class USBCamera(USBDevice):
         result = self._libfli.FLIStartVideoMode(self._dev)
         if result != 0:
             raise FLIError(f"FLIStartVideoMode failed: {result}")
-        if DEBUG:
-            print("✅ Video mode started")
+        logger.debug("Video mode started")
 
     def stop_video_mode(self):
         """Stop video streaming mode and return to normal operation.
@@ -553,8 +567,7 @@ class USBCamera(USBDevice):
         result = self._libfli.FLIStopVideoMode(self._dev)
         if result != 0:
             raise FLIError(f"FLIStopVideoMode failed: {result}")
-        if DEBUG:
-            print("✅ Video mode stopped")
+        logger.debug("Video mode stopped")
 
     def grab_video_frame(self):
         """Grab a single frame from the video stream.

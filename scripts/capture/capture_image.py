@@ -27,14 +27,8 @@ from fli.core.lib import (
     flidomain_t, FLI_FRAME_TYPE_NORMAL
 )
 
-# Import the centralized auto-exposure module
-try:
-    from .auto_expose import auto_expose as ae_auto_expose, evaluate_exposure, AutoExposeResult
-except ImportError:
-    # Running as script - add parent to path
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, os.path.dirname(os.path.dirname(script_dir)))
-    from scripts.capture.auto_expose import auto_expose as ae_auto_expose, evaluate_exposure, AutoExposeResult
+# Centralized auto-exposure module (lives in the installed fli package)
+from fli.auto_expose import auto_expose as ae_auto_expose, evaluate_exposure, AutoExposeResult
 
 class FLISystem:
     def __init__(self):

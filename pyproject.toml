@@ -37,10 +37,12 @@ dependencies = [
 [project.optional-dependencies]
 video = ["opencv-python>=4.5.0"]
 astro = ["spiceypy>=6.0.0"]
+netcdf = ["netCDF4>=1.6.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",
     "spiceypy>=6.0.0",
+    "netCDF4>=1.6.0",
 ]
 
 [project.urls]
@@ -55,7 +57,9 @@ where = ["src"]
 "fli.core" = ["*.so", "*.dylib"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# tests/diagnostics/ holds standalone hardware diagnostic scripts, not
+# pytest suites — keep it out of collection.
+testpaths = ["tests/unit", "tests/integration"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

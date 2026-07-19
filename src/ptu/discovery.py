@@ -53,6 +53,51 @@ def list_serial_ports() -> List[str]:
     return [p.device for p in serial.tools.list_ports.comports()]
 
 
+def _read_reply(
+    conn: serial.Serial,
+    command: str,
+    max_lines: int = 4,
+) -> Optional[str]:
+    """Read lines until one correlates with ``command``.
+
+    The PTU echoes commands by default, so a genuine response line either
+    begins with the echoed command (``"VM * PTU-D100E..."``) or, with
+    echo disabled, is a bare ``*``/``!`` line. Anything else is a stale
+    response from an earlier exchange and is discarded, so the probe
+    cannot desynchronize the command/response stream it leaves behind.
+
+    Parameters
+    ----------
+    conn : serial.Serial
+        Open serial connection.
+    command : str
+        Command string that was sent (without delimiter).
+    max_lines : int
+        Maximum lines to read before giving up.
+
+    Returns
+    -------
+    str or None
+        Response payload with the echo stripped, beginning with ``*`` or
+        ``!``; None if no correlated response arrived.
+    """
+    for _ in range(max_lines):
+        raw = conn.readline()
+        if not raw:
+            return None
+        line = raw.decode(errors="replace").strip()
+        if not line:
+            continue
+        if line.startswith(command):
+            payload = line[len(command):].strip()
+            if payload.startswith(("*", "!")):
+                return payload
+            continue
+        if line.startswith(("*", "!")):
+            return line
+    return None
+
+
 def probe_port(
     port: str,
     baudrate: int = 9600,
@@ -64,6 +109,9 @@ def probe_port(
     Opens a temporary connection, sends the VM (Version Model) command,
     and checks whether the response contains ``model_filter``. If a
     match is found, also queries VS (serial number) and V (firmware).
+    Responses are read with echo-aware correlation so the probe works
+    whether the PTU has command echo enabled (the default) or disabled,
+    and leaves no unconsumed responses behind.
 
     Parameters
     ----------
@@ -98,29 +146,25 @@ def probe_port(
 
         # Query model
         conn.write(b"VM ")
-        response = conn.readline().decode(errors="replace").strip()
-
-        if model_filter not in response:
+        vm_payload = _read_reply(conn, "VM")
+        if vm_payload is None or model_filter not in vm_payload:
             return None
 
-        # Parse model string: response is "* <model>"
-        model = response.lstrip("* ").strip() if response.startswith("*") else response
+        model = vm_payload.lstrip("*").strip()
 
         # Query serial number
         serial_number = None
         conn.write(b"VS ")
-        vs_resp = conn.readline().decode(errors="replace").strip()
-        if vs_resp.startswith("*"):
-            parts = vs_resp.split(maxsplit=1)
-            serial_number = parts[1].strip() if len(parts) > 1 else None
+        vs_payload = _read_reply(conn, "VS")
+        if vs_payload is not None and vs_payload.startswith("*"):
+            serial_number = vs_payload.lstrip("*").strip() or None
 
         # Query firmware version
         firmware_version = None
         conn.write(b"V ")
-        v_resp = conn.readline().decode(errors="replace").strip()
-        if v_resp.startswith("*"):
-            parts = v_resp.split(maxsplit=1)
-            firmware_version = parts[1].strip() if len(parts) > 1 else None
+        v_payload = _read_reply(conn, "V")
+        if v_payload is not None and v_payload.startswith("*"):
+            firmware_version = v_payload.lstrip("*").strip() or None
 
         return PTUDeviceInfo(
             port=port,
@@ -129,7 +173,9 @@ def probe_port(
             firmware_version=firmware_version,
         )
 
-    except (serial.SerialException, OSError, UnicodeDecodeError):
+    except (serial.SerialException, OSError, UnicodeDecodeError) as e:
+        log = logging.getLogger(__name__)
+        log.debug(f"Probe of {port} failed: {e}")
         return None
 
     finally:

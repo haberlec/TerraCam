@@ -19,7 +19,16 @@ Usage:
         ptu.gpm.point_to_coordinate(GeoTarget(40.7128, -74.0060, 10.0))
 """
 
-from .controller import PTUController, PTUConfig, PowerMode
+from .controller import (
+    PTUController,
+    PTUConfig,
+    PowerMode,
+    PTUError,
+    PTUConnectionError,
+    PTUCommandError,
+    PTUTimeoutError,
+    PTUProtocolError,
+)
 from .discovery import PTUDeviceInfo, discover_ptu
 from .gpm import (
     GPMController,
@@ -36,6 +45,11 @@ __all__ = [
     'PTUController',
     'PTUConfig',
     'PowerMode',
+    'PTUError',
+    'PTUConnectionError',
+    'PTUCommandError',
+    'PTUTimeoutError',
+    'PTUProtocolError',
     'PTUDeviceInfo',
     'discover_ptu',
     'GPMController',

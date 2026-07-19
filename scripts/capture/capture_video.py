@@ -21,7 +21,7 @@ Usage:
         vc.start_live_view()
 
     # With auto-exposure (use auto_expose first)
-    from scripts.capture.auto_expose import auto_expose
+    from fli.auto_expose import auto_expose
     result = auto_expose(camera)
     with VideoCapture(exposure_ms=result.exposure_ms) as vc:
         vc.start_live_view()

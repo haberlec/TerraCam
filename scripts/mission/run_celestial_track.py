@@ -159,6 +159,12 @@ def parse_args() -> argparse.Namespace:
         "--session-name", type=str, default=None,
         help="Session name (default: auto-generated)"
     )
+    parser.add_argument(
+        "--output-format", type=str, default="netcdf",
+        choices=["netcdf", "legacy"],
+        help="Output format: netcdf (single file per position) or legacy "
+             "(TIFF+JPEG+JSON per band) (default: netcdf)"
+    )
 
     args = parser.parse_args()
 
@@ -292,8 +298,8 @@ def main():
             baudrate=args.baudrate,
             pan_speed=1000,
             tilt_speed=1000,
-            hold_power_mode=PowerMode.REGULAR,
-            move_power_mode=PowerMode.HIGH,
+            hold_power_mode=PowerMode.LOW,
+            move_power_mode=PowerMode.LOW,
         )
 
         # Create coordinator
@@ -302,6 +308,7 @@ def main():
             fli_system=fli_system,
             output_dir=args.output,
             session_logger=session_logger,
+            output_format=args.output_format,
         )
 
         # Initialize PTU
