@@ -32,6 +32,13 @@ class USBDevice(object):
     #load the DLL
     _libfli = FLILibrary.getDll(debug=DEBUG)
     _domain = flidomain_t(FLIDOMAIN_USB)
+    # Model-name substrings identifying this device class. FLIList returns
+    # every FLI USB device regardless of the device-type bits in the
+    # domain, so find_devices() must filter by model before opening —
+    # otherwise it tries to FLIOpen (e.g.) a filter wheel as a camera and
+    # the C library raises "Operation not supported by device". Empty
+    # tuple on the base class means "match anything".
+    _model_keywords = ()
 
     def __init__(self, dev_name, model):
         self.dev_name = dev_name
@@ -74,9 +81,27 @@ class USBDevice(object):
         return serial.value
     
     @classmethod
+    def _model_matches(cls, model):
+        """Return True if a device model belongs to this device class.
+
+        Matches when any of ``cls._model_keywords`` is a substring of the
+        model name (case-insensitive). An empty keyword tuple matches any
+        device (base-class behavior).
+        """
+        if not cls._model_keywords:
+            return True
+        model_str = model.decode('utf-8', 'replace') if isinstance(model, bytes) else model
+        return any(kw.lower() in model_str.lower() for kw in cls._model_keywords)
+
+    @classmethod
     def find_devices(cls):
-        """locates all FLI USB devices in the current domain and returns a 
-           list of USBDevice objects"""
+        """locates the FLI USB devices of this class and returns a list of
+           USBDevice objects.
+
+           FLIList returns all FLI USB devices regardless of the device
+           type requested, so results are filtered by model name (see
+           ``_model_keywords``) before opening — opening a device of the
+           wrong type raises an FLIError from the C library."""
 
         tmplist = POINTER(c_char_p)()
         cls._libfli.FLIList(cls._domain, byref(tmplist))      #allocates memory
@@ -86,7 +111,8 @@ class USBDevice(object):
         if tmplist:
             while tmplist[i]: #process members only if they are not NULLG
                 dev_name, model = tmplist[i].split(b";")
-                devs.append(cls(dev_name=dev_name,model=model))   #create device objects
+                if cls._model_matches(model):                 #skip other device types
+                    devs.append(cls(dev_name=dev_name,model=model))   #create device objects
                 i += 1
             cls._libfli.FLIFreeList(tmplist)                      #frees memory
         #finished processing list

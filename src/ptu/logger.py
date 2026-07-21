@@ -62,7 +62,9 @@ class SessionLogger:
     def __init__(self, log_dir: str = "./logs",
                  session_name: Optional[str] = None):
         self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(exist_ok=True)
+        # parents=True: the output/logs directory may not exist yet on a
+        # fresh run (common in the field with a new --output location)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
         if session_name is None:
             session_name = f"ptu_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

@@ -31,7 +31,8 @@ class USBFilterWheel(USBDevice):
     #load the DLL
     _libfli = FLILibrary.getDll(debug=DEBUG)
     _domain = flidomain_t(FLIDOMAIN_USB | FLIDEVICE_FILTERWHEEL)
-    
+    _model_keywords = ('Filter Wheel', 'CenterLine', 'CFW', 'HS-CFW')
+
     def __init__(self, dev_name, model):
         USBDevice.__init__(self, dev_name = dev_name, model = model)
 

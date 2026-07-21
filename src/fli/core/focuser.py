@@ -26,7 +26,8 @@ class USBFocuser(USBDevice):
     #load the DLL
     _libfli = FLILibrary.getDll(debug=DEBUG)
     _domain = flidomain_t(FLIDOMAIN_USB | FLIDEVICE_FOCUSER)
-    
+    _model_keywords = ('Focuser', 'Atlas', 'PDF')
+
     def __init__(self, dev_name, model):
         USBDevice.__init__(self, dev_name = dev_name, model = model)
         self.stepper_position = None

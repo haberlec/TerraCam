@@ -88,6 +88,45 @@ class TestChkErr:
         assert warn.errors is None
 
 
+class TestFindDevicesFiltering:
+    """find_devices() must filter FLIList results by device model.
+
+    FLIList returns every FLI USB device regardless of the requested
+    device-type bits, so a camera find must not try to open a filter
+    wheel (which raises 'Operation not supported by device'). Regression
+    for the device-enumeration bug found on real hardware.
+    """
+
+    def test_camera_matches_only_camera_models(self):
+        from fli.core.camera import USBCamera
+        assert USBCamera._model_matches(b"MicroLine ML695")
+        assert not USBCamera._model_matches(b"CenterLine Filter Wheel")
+
+    def test_filter_wheel_matches_only_wheel_models(self):
+        from fli.core.filter_wheel import USBFilterWheel
+        assert USBFilterWheel._model_matches(b"CenterLine Filter Wheel")
+        assert not USBFilterWheel._model_matches(b"MicroLine ML695")
+
+    def test_only_matching_models_would_be_opened(self):
+        """The filter applied in find_devices selects the right subset.
+
+        Mirrors the model-name check find_devices() applies to each
+        FLIList entry before instantiating (and thus opening) it.
+        """
+        from fli.core.camera import USBCamera
+        from fli.core.filter_wheel import USBFilterWheel
+
+        # A representative mixed FLIList result (name;model per entry)
+        entries = [b"cam0;MicroLine ML695", b"fw0;CenterLine Filter Wheel"]
+        models = [e.split(b";")[1] for e in entries]
+
+        cam_opened = [m for m in models if USBCamera._model_matches(m)]
+        fw_opened = [m for m in models if USBFilterWheel._model_matches(m)]
+
+        assert cam_opened == [b"MicroLine ML695"]
+        assert fw_opened == [b"CenterLine Filter Wheel"]
+
+
 class TestWaitForIdle:
     """Camera idle wait: transient faults retried, never silent-crash."""
 

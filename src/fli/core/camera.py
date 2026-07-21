@@ -46,7 +46,9 @@ class USBCamera(USBDevice):
     #load the DLL
     _libfli = FLILibrary.getDll(debug=DEBUG)
     _domain = flidomain_t(FLIDOMAIN_USB | FLIDEVICE_CAMERA)
-    
+    # MicroLine (ML*), ProLine (PL*), Kepler, etc. are FLI camera models
+    _model_keywords = ('MicroLine', 'ProLine', 'ML', 'PL', 'Kepler')
+
     def __init__(self, dev_name, model, bitdepth = DEFAULT_BITDEPTH):
         USBDevice.__init__(self, dev_name = dev_name, model = model)
         self.hbin  = 1
