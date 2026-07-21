@@ -176,6 +176,34 @@ def parallax_corrected_center(
 # Survey loading
 # ---------------------------------------------------------------------------
 
+def read_band_oriented(ds, band_index: int) -> np.ndarray:
+    """Read one band and de-rotate it to scene orientation.
+
+    Whether the raw frame needs a 180-degree rotation is read from the
+    file's ``sensor_inverted`` attribute (1 = sensor mounted upside-down).
+    Files written before that attribute existed (the original inverted
+    mount) default to inverted, preserving the historical behavior where
+    every tile was rotated 180 degrees. See fli.geometry.image_rotation_k.
+
+    Parameters
+    ----------
+    ds : netCDF4.Dataset
+        Open dataset for one position.
+    band_index : int
+        Band array index to read.
+
+    Returns
+    -------
+    np.ndarray
+        The band, rotated to scene orientation.
+    """
+    band = ds.variables["digital_number"][band_index, :, :]
+    # Default True: legacy files (no attribute) came from the inverted mount
+    inverted = bool(getattr(ds, "sensor_inverted", 1))
+    k = 2 if inverted else 0
+    return np.rot90(band, k) if k else np.asarray(band)
+
+
 def load_survey(summary_path: str) -> Tuple[Dict, List[Dict]]:
     """Load survey summary and validate required fields.
 
@@ -456,9 +484,7 @@ def assemble_mosaic(
 
         nc_path = _resolve_nc_path(pos, summary_dir)
         with nc.Dataset(nc_path, "r") as ds:
-            tile_data = np.rot90(
-                ds.variables["digital_number"][band_index, :, :], 2
-            ).astype(np.float64)
+            tile_data = read_band_oriented(ds, band_index).astype(np.float64)
 
         r_end = min(row_start + tile_h, canvas_h)
         c_end = min(col_start + tile_w, canvas_w)
@@ -524,9 +550,7 @@ def _load_tile_8bit(
     """
     nc_path = _resolve_nc_path(position, summary_dir)
     with nc.Dataset(nc_path, "r") as ds:
-        tile_16 = np.rot90(
-            ds.variables["digital_number"][band_index, :, :], 2
-        )
+        tile_16 = read_band_oriented(ds, band_index)
 
     p_low, p_high = np.percentile(tile_16, [1, 99])
     if p_high <= p_low:
@@ -709,9 +733,8 @@ def assemble_mosaic_opencv(
         ti = tilt_to_idx[pos["target_position"]["tilt_deg"]]
         nc_path = _resolve_nc_path(pos, summary_dir)
         with nc.Dataset(nc_path, "r") as ds:
-            tiles_16bit[(pi, ti)] = np.rot90(
-                ds.variables["digital_number"][band_index, :, :], 2
-            ).astype(np.float64)
+            tiles_16bit[(pi, ti)] = read_band_oriented(
+                ds, band_index).astype(np.float64)
 
     overlap_h_px = int(tile_w * geometry["overlap"])
     overlap_v_px = int(tile_h * geometry["overlap"])
@@ -1841,9 +1864,7 @@ def _load_tiles(
 
         nc_path = _resolve_nc_path(pos, summary_dir)
         with nc.Dataset(nc_path, "r") as ds:
-            tile_data = np.rot90(
-                ds.variables["digital_number"][band_index, :, :], 2
-            ).astype(np.float64)
+            tile_data = read_band_oriented(ds, band_index).astype(np.float64)
 
         # Grid indexing uses the nominal angles; projection uses the
         # parallax-corrected pointing (identity when no scene range set)

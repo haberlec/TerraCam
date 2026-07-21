@@ -145,6 +145,25 @@ manually safe the hardware, but visually confirm the gimbal stopped.
 
 ---
 
+## 3b. Camera mounting orientation
+
+The camera currently mounts with its labels upright, which puts the
+**sensor upside-down** — so the raw frame is rotated 180° relative to the
+scene. This is recorded as `sensor_inverted: true` in
+`config/ptu_specifications.json` → `mount_geometry`, stamped into every
+NetCDF, and read by the mosaic, derived-product, backplane, and aiming
+code, which de-rotate automatically. You do not pass any flag for this.
+
+The `aim_ptu` preview de-rotates too, so what you frame in the aiming
+window matches the delivered data and mosaics.
+
+**If you remount the camera the other way up** (sensor upright), set
+`sensor_inverted: false` in the config — that single change keeps capture,
+aiming, mosaicking, derived products, and backplanes all consistent. New
+captures then carry `sensor_inverted: false` in their files; old captures
+keep `true`, so both process correctly with no flags. See the remount
+procedure in docs/hardware_checklist.md.
+
 ## 4. Cooling (optional)
 
     --target-temp -20         # set CCD target temperature in C

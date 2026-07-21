@@ -107,10 +107,34 @@ class MountModel:
     boresight_tilt_offset_deg : float
         Fixed angular misalignment about the tilt axis (adds to
         elevation).
+    sensor_inverted : bool
+        True if the camera is mounted such that the sensor is upside-down
+        (raw image rotated 180 deg relative to the scene). Drives the
+        image-plane roll used both for backplane geometry and for
+        de-rotating captured frames.
     """
     camera_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     boresight_pan_offset_deg: float = 0.0
     boresight_tilt_offset_deg: float = 0.0
+    sensor_inverted: bool = False
+
+
+def image_rotation_k(sensor_inverted: bool) -> int:
+    """Return the ``numpy.rot90`` k-value that de-rotates a captured frame.
+
+    A single source of truth for scene orientation: every consumer that
+    displays or mosaics raw frames (create_mosaic, generate_derived_
+    products, aim_ptu) uses this so they cannot disagree. ``k=2`` is a
+    180-degree rotation for an inverted sensor; ``k=0`` (no rotation) when
+    the sensor is upright.
+
+    Parameters
+    ----------
+    sensor_inverted : bool
+        Whether the sensor was mounted upside-down (from the capture
+        metadata or the mount config).
+    """
+    return 2 if sensor_inverted else 0
 
 
 def _rot_z(angle_rad: float) -> np.ndarray:
@@ -314,6 +338,7 @@ def camera_model_from_configs(
     lens_id: str,
     width_px: int,
     height_px: int,
+    mount_inverted: bool = False,
 ) -> CameraModel:
     """Build a nominal CameraModel from the project lens config.
 
@@ -330,6 +355,10 @@ def camera_model_from_configs(
         Lens identifier key (e.g. "28mm", "50mm").
     width_px, height_px : int
         Actual captured image dimensions in pixels.
+    mount_inverted : bool
+        If True the sensor is mounted upside-down; the camera model's
+        image-plane roll is set to 180 deg so the backplane az/el matches
+        the de-rotated frame.
 
     Raises
     ------
@@ -344,6 +373,7 @@ def camera_model_from_configs(
         pixel_pitch_um=float(sensor["pixel_size_um"]),
         width_px=int(width_px),
         height_px=int(height_px),
+        roll_deg=180.0 if mount_inverted else 0.0,
     )
 
 
@@ -370,4 +400,5 @@ def mount_model_from_config(mount_config: Optional[dict]) -> MountModel:
         boresight_tilt_offset_deg=float(
             mount_config.get("boresight_tilt_offset_deg", 0.0)
         ),
+        sensor_inverted=bool(mount_config.get("sensor_inverted", False)),
     )

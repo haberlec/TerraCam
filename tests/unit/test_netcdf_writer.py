@@ -759,6 +759,18 @@ class TestBackplanes:
         finally:
             ds.close()
 
+    def test_sensor_inverted_attr_written(self, base_kwargs, synthetic_image):
+        """Mount orientation is stamped as a global attribute."""
+        for inverted, expect in ((True, 1), (False, 0)):
+            ds = self._write(
+                base_kwargs, synthetic_image,
+                mount_config={"sensor_inverted": inverted},
+            )
+            try:
+                assert int(ds.sensor_inverted) == expect
+            finally:
+                ds.close()
+
     def test_finite_range_parallax_applied(
         self, base_kwargs, synthetic_image
     ):

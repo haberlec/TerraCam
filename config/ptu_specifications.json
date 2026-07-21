@@ -22,7 +22,8 @@
   "command_timeout_s": 3.0,
   "poll_interval_s": 0.2,
   "mount_geometry": {
-    "description": "Camera entrance pupil offset from the pan/tilt axes intersection, in the tilt-stage frame (meters). The tilt axis passes near the lens nodal point (no tilt parallax); the pupil sits forward of the pan axis (pan parallax at finite range). Measure and update; angular offsets are calibratable from a mosaic model fit.",
+    "description": "How the camera is physically mounted on the PTU. sensor_inverted: the camera mounts with its labels upright but the sensor is then upside-down, so the raw image is rotated 180 deg relative to the scene; downstream code (mosaic, derived products, backplane roll, aim_ptu preview) reads this and corrects. Set false after remounting the camera the other way up. camera_offset_m: entrance-pupil offset from the pan/tilt axes intersection, tilt-stage frame (forward/along-tilt-axis/up), meters, for backplane parallax. boresight offsets are calibratable from a mosaic model fit.",
+    "sensor_inverted": true,
     "camera_offset_m": {
       "forward": 0.0,
       "along_tilt_axis": 0.0,

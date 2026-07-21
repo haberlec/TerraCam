@@ -72,6 +72,25 @@ class TestLoadRawImages:
         for i in range(16):
             assert cube[0, 0, i] == i + 1
 
+    def test_legacy_metadata_defaults_inverted(self, tmp_path,
+                                                filter_wavelengths):
+        """Captures without a sensor_inverted field default to inverted."""
+        write_capture(tmp_path, "capture_400", 1, pixel_value=1)
+        _, band_metadata = load_raw_images(tmp_path, filter_wavelengths)
+        assert band_metadata[0]["sensor_inverted"] is True
+
+    def test_explicit_upright_metadata_honored(self, tmp_path,
+                                               filter_wavelengths):
+        """A capture that declares an upright sensor is not de-rotated."""
+        image = np.full((8, 8), 5, dtype=np.uint16)
+        Image.fromarray(image).save(str(tmp_path / "cap.tiff"))
+        with open(tmp_path / "cap_metadata.json", "w") as f:
+            json.dump({"acquisition_settings": {
+                "filter_position": 1, "exposure_time_ms": 100,
+                "sensor_inverted": False}}, f)
+        _, band_metadata = load_raw_images(tmp_path, filter_wavelengths)
+        assert band_metadata[0]["sensor_inverted"] is False
+
     def test_clear_position_skipped(self, tmp_path, filter_wavelengths):
         write_capture(tmp_path, "capture_clear", 0, pixel_value=999)
         write_capture(tmp_path, "capture_400", 1, pixel_value=1)

@@ -876,6 +876,9 @@ class PayloadCoordinator:
                 "ccd_temperature_c": ccd_temp,
                 "frame_type": "normal",
                 "capture_duration_s": capture_time_s,
+                "sensor_inverted": bool(
+                    (self._mount_config or {}).get("sensor_inverted", False)
+                ),
             },
             "ptu_position": {
                 "pan_degrees": position.pan_degrees,

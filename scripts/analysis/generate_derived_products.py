@@ -84,8 +84,9 @@ def load_band_set(metadata_path: Path, n_bands: int) -> BandSet:
 
     Returns
     -------
-    BandSet
-        Wavelength-indexed band lookup for the cube.
+    tuple of (BandSet, dict)
+        Wavelength-indexed band lookup and the full metadata dict (which
+        carries ``sensor_inverted`` and other provenance).
 
     Raises
     ------
@@ -112,7 +113,7 @@ def load_band_set(metadata_path: Path, n_bands: int) -> BandSet:
             f"{n_bands}: {metadata_path} does not describe this cube"
         )
 
-    return BandSet(wavelengths)
+    return BandSet(wavelengths), metadata
 
 
 def crop_and_rotate(
@@ -630,7 +631,6 @@ def run_pipeline(args: argparse.Namespace) -> None:
     """Execute the derived product generation pipeline."""
     output_dir = Path(args.output_dir)
     crop = tuple(args.crop) if args.crop else DEFAULT_CROP
-    rotate_180 = not args.no_rotate
 
     logger.info("Loading reflectance cube: %s", args.cube)
     refl_cube = np.load(args.cube)
@@ -641,14 +641,26 @@ def run_pipeline(args: argparse.Namespace) -> None:
         Path(args.metadata) if args.metadata
         else cube_path.with_name(f"{cube_path.stem}_metadata.json")
     )
-    bands = load_band_set(metadata_path, refl_cube.shape[2])
+    bands, cube_meta = load_band_set(metadata_path, refl_cube.shape[2])
     logger.info(
         "Band wavelengths (nm): %s",
         ", ".join("clear" if wl is None else f"{wl:.0f}"
                   for wl in bands.wavelengths_nm),
     )
 
-    logger.info("Crop %s, rotate_180=%s", crop, rotate_180)
+    # Resolve 180-degree de-rotation. --no-rotate (deprecated) and
+    # --rotate on/off force it; otherwise 'auto' reads the cube's
+    # sensor_inverted metadata (default True for legacy cubes without it).
+    if args.no_rotate or args.rotate == "off":
+        rotate_180 = False
+    elif args.rotate == "on":
+        rotate_180 = True
+    else:  # auto
+        rotate_180 = bool(cube_meta.get("sensor_inverted", True))
+
+    logger.info("Crop %s, rotate_180=%s (source: %s)", crop, rotate_180,
+                "flag" if (args.no_rotate or args.rotate != "auto")
+                else "cube metadata")
     cube = crop_and_rotate(refl_cube, crop, rotate_180)
     h, w, nb = cube.shape
     logger.info("Working cube: %d x %d x %d bands", h, w, nb)
@@ -724,8 +736,13 @@ def parse_args() -> argparse.Namespace:
         help="Crop bounds (default: %(default)s).",
     )
     geom.add_argument(
+        "--rotate", choices=["auto", "on", "off"], default="auto",
+        help="180-degree scene de-rotation. 'auto' (default) uses the "
+             "cube's sensor_inverted metadata; 'on'/'off' force it.",
+    )
+    geom.add_argument(
         "--no-rotate", action="store_true",
-        help="Skip 180-degree rotation.",
+        help="Deprecated alias for --rotate off.",
     )
 
     mask = parser.add_argument_group("Shadow mask")

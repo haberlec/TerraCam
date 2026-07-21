@@ -17,6 +17,7 @@ from fli.geometry import (
     MountModel,
     boresight_azel,
     camera_model_from_configs,
+    image_rotation_k,
     mount_model_from_config,
     pixel_to_azel,
 )
@@ -185,6 +186,36 @@ class TestGridComputation:
         az, el = pixel_to_azel(CAM, MOUNT, 0.0, 0.0)
         assert az.shape == (CAM.height_px, CAM.width_px)
         assert el.shape == az.shape
+
+
+class TestSensorOrientation:
+    """Single source of truth for scene orientation (inverted mount)."""
+
+    def test_rotation_k(self):
+        assert image_rotation_k(True) == 2   # 180-degree
+        assert image_rotation_k(False) == 0  # no rotation
+
+    def test_inverted_mount_sets_camera_roll(self):
+        import json
+        with open("config/lens_specifications.json") as f:
+            lens_config = json.load(f)
+        cam = camera_model_from_configs(
+            lens_config, "28mm", 2758, 2208, mount_inverted=True)
+        assert cam.roll_deg == 180.0
+        cam2 = camera_model_from_configs(
+            lens_config, "28mm", 2758, 2208, mount_inverted=False)
+        assert cam2.roll_deg == 0.0
+
+    def test_mount_config_reads_sensor_inverted(self):
+        m = mount_model_from_config({"sensor_inverted": True})
+        assert m.sensor_inverted is True
+        assert mount_model_from_config({}).sensor_inverted is False
+
+    def test_real_config_is_inverted(self):
+        """Current mount config declares the sensor inverted."""
+        import json
+        mc = json.load(open("config/ptu_specifications.json"))["mount_geometry"]
+        assert mount_model_from_config(mc).sensor_inverted is True
 
 
 class TestMosaicParallaxEquivalence:

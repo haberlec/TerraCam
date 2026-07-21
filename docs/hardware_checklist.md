@@ -137,6 +137,40 @@ Enable wire logging for every PTU session below:
       import moved to the installed `fli.auto_expose` module (imports
       verified without hardware; capture flow itself unchanged).
 
+## Camera mounting orientation
+
+The mount currently puts the sensor upside-down (labels upright), so
+`config/ptu_specifications.json` → `mount_geometry.sensor_inverted` is
+`true`. Orientation is metadata-driven end to end: stamped into each
+NetCDF and each capture's metadata, read by mosaic / derived-products /
+backplane / aim_ptu, all of which de-rotate automatically. Old (inverted)
+and future (upright) captures each carry their own flag, so both process
+correctly with no analysis-time flags.
+
+- [ ] **Confirm the de-rotation direction on hardware.** In `aim_ptu`,
+      point at a scene with obvious up/down and left/right; confirm the
+      (de-rotated) preview shows it the right way up and that PTU
+      up/left/right nudges move the scene the expected way. If the
+      preview is still upside-down, the mount is *not* actually inverted
+      — set `sensor_inverted: false`.
+- [ ] **Backplane sign check.** With a de-rotated capture, confirm the
+      backplane azimuth increases toward increasing image column (the
+      camera roll_deg is tied to the same flag).
+
+### Remount procedure (when flipping the camera upright)
+
+When you physically remount the camera so the sensor is upright:
+
+1. Edit `config/ptu_specifications.json` → `mount_geometry.sensor_inverted`
+   to `false`. This is the **only** change required.
+2. Re-run the `aim_ptu` orientation check above to confirm the preview is
+   now upright with no rotation.
+3. New captures automatically stamp `sensor_inverted: false`; existing
+   data keeps `true`. No reprocessing of old data is needed, and no
+   analysis flags change.
+4. If you have raw-TIFF (legacy) captures without the field, they default
+   to inverted — correct for everything captured on the old mount.
+
 ## Notes / results
 
 (Record dates, log file paths, and measurements here as items are run.)

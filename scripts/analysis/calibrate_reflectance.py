@@ -182,10 +182,18 @@ def load_raw_images(
 
     for i, (pos, img, exp_ms, meta) in enumerate(band_images):
         cube[:, :, i] = img
+        # Sensor mounting orientation travels with the capture so the
+        # reflectance cube and its derived products can de-rotate
+        # correctly. Legacy captures predate the field: default True
+        # (the original inverted mount).
+        sensor_inverted = meta.get(
+            "acquisition_settings", {}
+        ).get("sensor_inverted", True)
         metadata_list.append({
             "filter_position": pos,
             "wavelength_nm": filter_wavelengths[pos],
             "exposure_ms": exp_ms,
+            "sensor_inverted": bool(sensor_inverted),
             "source_file": meta.get(
                 "source_file",
                 meta.get("image_info", {}).get("filename", ""),
@@ -385,9 +393,13 @@ def calibrate_reflectance(
             )
 
     wavelengths_nm = [b["wavelength_nm"] for b in band_metadata]
+    # Orientation is a whole-capture property; take it from the first band
+    # (all bands of one position share a mount). Default True for legacy.
+    sensor_inverted = bool(band_metadata[0].get("sensor_inverted", True))
     calibration_metadata = {
         "bands": cal_bands,
         "wavelengths_nm": wavelengths_nm,
+        "sensor_inverted": sensor_inverted,
         "shape": list(refl_cube.shape),
         "description": (
             f"Approximate reflectance hypercube, {nb} bands "

@@ -143,6 +143,9 @@ class MultispectralNetCDF:
         self.backplanes = backplanes
         self.scene_range_m = scene_range_m
         self.mount_config = mount_config
+        self._sensor_inverted = bool(
+            (mount_config or {}).get("sensor_inverted", False)
+        )
         self.actual_pan_degrees = actual_pan_degrees
         self.actual_tilt_degrees = actual_tilt_degrees
         self.filepath = Path(filepath)
@@ -232,6 +235,13 @@ class MultispectralNetCDF:
             ds.actual_pan_degrees = np.float64(self.actual_pan_degrees)
         if self.actual_tilt_degrees is not None:
             ds.actual_tilt_degrees = np.float64(self.actual_tilt_degrees)
+
+        # Sensor mounting orientation. 1 = sensor mounted upside-down, so
+        # digital_number is rotated 180 deg relative to the scene and
+        # analysis must de-rotate. Stamped per file so old (inverted) and
+        # future (upright) captures are each handled correctly without a
+        # flag at analysis time.
+        ds.sensor_inverted = np.int8(1 if self._sensor_inverted else 0)
 
         # Sensor metadata
         if self._camera_config:
@@ -602,7 +612,8 @@ class MultispectralNetCDF:
 
         try:
             camera = camera_model_from_configs(
-                self._lens_config, self.lens_id, width, height
+                self._lens_config, self.lens_id, width, height,
+                mount_inverted=self._sensor_inverted,
             )
         except KeyError as e:
             logger.warning("Backplanes skipped: lens config missing %s", e)

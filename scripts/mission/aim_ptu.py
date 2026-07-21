@@ -49,6 +49,7 @@ except ImportError:
 
 from fli import FLISystem
 from fli.config import load_config
+from fli.geometry import image_rotation_k
 from ptu import PTUController, PTUConfig, PTUError
 
 logger = logging.getLogger("aim_ptu")
@@ -100,7 +101,8 @@ class PTUAimer:
 
     def __init__(self, fli: FLISystem, ptu: PTUController, lens_id: str = "28mm",
                  exposure_ms: int = 100, step_deg: float = 2.5,
-                 pan_limit_deg: float = 90.0, tilt_limit_deg: float = 20.0):
+                 pan_limit_deg: float = 90.0, tilt_limit_deg: float = 20.0,
+                 sensor_inverted: bool = False):
         self.fli = fli
         self.ptu = ptu
         self.lens_id = lens_id
@@ -108,6 +110,9 @@ class PTUAimer:
         self.step_deg = step_deg
         self.pan_limit = pan_limit_deg
         self.tilt_limit = tilt_limit_deg
+        # De-rotate the preview so what you frame matches the delivered
+        # data (and mosaics). Uses the same rule as the analysis path.
+        self._rot_k = image_rotation_k(sensor_inverted)
 
         self.fov_h, self.fov_v = self._compute_fov(lens_id)
 
@@ -154,7 +159,9 @@ class PTUAimer:
     # -- display ---------------------------------------------------------
 
     def _scale_for_display(self, image: np.ndarray) -> np.ndarray:
-        """16-bit -> 8-bit percentile stretch, downscaled for the window."""
+        """De-rotate, 16-bit -> 8-bit percentile stretch, downscale."""
+        if self._rot_k:
+            image = np.rot90(image, self._rot_k)
         lo, hi = np.percentile(image, [1, 99])
         if hi <= lo:
             hi = lo + 1
@@ -401,10 +408,17 @@ def main() -> int:
         if args.filter:
             fli.move_filter(args.filter)
 
+        # Match the preview orientation to captured data (mount config)
+        ptu_cfg = load_config("ptu_specifications.json") or {}
+        sensor_inverted = bool(
+            ptu_cfg.get("mount_geometry", {}).get("sensor_inverted", False)
+        )
+
         aimer = PTUAimer(
             fli, ptu, lens_id=args.lens,
             exposure_ms=args.exposure, step_deg=args.step,
             pan_limit_deg=args.pan_limit, tilt_limit_deg=args.tilt_limit,
+            sensor_inverted=sensor_inverted,
         )
         aimer.current_filter = fli.get_filter_position()
         aimer.run()
